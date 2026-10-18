@@ -1,5 +1,6 @@
 """Live market data from the Albion Online Data Project (albion-online-data.com, crowd-sourced)."""
-import hashlib, json, os, time, urllib.error, urllib.parse, urllib.request
+import gzip, json, os, random, sqlite3, time, urllib.error, urllib.parse, urllib.request
+from contextlib import closing
 from collections import defaultdict
 from .core import AOError, label, money, fmt, table, resolve_item, recipes_of, returnable, item_value
 
@@ -8,64 +9,183 @@ SERVERS = ("europe", "west", "east")
 CITIES = ["Caerleon", "Bridgewatch", "Fort Sterling", "Lymhurst", "Martlock", "Thetford", "Brecilien", "Black Market"]
 SETUP_FEE, TAX_PREMIUM, TAX_NO_PREMIUM = 0.025, 0.04, 0.08
 RETURN_RATES = "royal city: 15.2% (no focus) / 43.5% (focus); city bonus category: 24.8% / 47.9%"
-_cache = {}
 CACHE_DIR = os.environ.get("AO_CACHE", os.path.join(os.path.expanduser("~"), ".cache", "ao-db"))
+CACHE_DB = os.path.join(CACHE_DIR, "market.sqlite")  # per-item answers + request log, shared by CLI runs and the MCP server
+TTL = {"prices": 600, "history": 3600}  # seconds an answer counts as fresh (history is daily data)
+URL_IDS_MAX = 3000  # characters of the id list per request (the API rejects very long URLs)
+LIMITS = ((60, 170), (300, 285))  # API limit per IP: 180 requests/min and 300 per 5 min — keep a margin
+WAIT = float(os.environ.get("AO_MARKET_WAIT", 30))  # max seconds one call waits on the rate limit before using cached prices
+_mem = {}  # in-process copy of fresh per-item answers
+
+
+class RateLimited(AOError):
+    pass
+
+
+def _db():
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    con = sqlite3.connect(CACHE_DB, timeout=10)
+    con.executescript("CREATE TABLE IF NOT EXISTS answers(key TEXT PRIMARY KEY, ts REAL, data TEXT);"
+                      "CREATE TABLE IF NOT EXISTS requests(ts REAL);"
+                      "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v REAL);")
+    return con
+
+
+def _cached(keys):
+    """{key: (rows, age in seconds)} of every stored answer, any age."""
+    out = {}
+    try:
+        with closing(_db()) as con:
+            for i in range(0, len(keys), 500):
+                part = keys[i:i + 500]
+                for k, ts, data in con.execute(f"SELECT key, ts, data FROM answers WHERE key IN ({','.join('?' * len(part))})", part):
+                    out[k] = (json.loads(data), time.time() - ts)
+    except (sqlite3.Error, OSError, ValueError):
+        pass
+    return out
+
+
+def _store(answers):
+    now = time.time()
+    try:
+        with closing(_db()) as con, con:
+            con.executemany("INSERT OR REPLACE INTO answers VALUES (?,?,?)", [(k, now, json.dumps(v)) for k, v in answers.items()])
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def _wait_for_slot():
+    """Seconds until the next request may go out: an active 429 cool-down or the client-side request budget."""
+    now = time.time()
+    try:
+        with closing(_db()) as con, con:
+            con.execute("DELETE FROM requests WHERE ts < ?", (now - max(w for w, _ in LIMITS),))
+            cool = (con.execute("SELECT v FROM meta WHERE k='cooldown'").fetchone() or (0,))[0]
+            wait = max(0.0, cool - now)
+            for window, n in LIMITS:
+                ts = [t for t, in con.execute("SELECT ts FROM requests WHERE ts > ? ORDER BY ts", (now - window,))]
+                if len(ts) >= n:
+                    wait = max(wait, ts[len(ts) - n] + window - now)
+            return wait
+    except (sqlite3.Error, OSError):
+        return 0.0
+
+
+def _log_request(cooldown=None):
+    try:
+        with closing(_db()) as con, con:
+            if cooldown is None:
+                con.execute("INSERT INTO requests VALUES (?)", (time.time(),))
+            else:
+                con.execute("INSERT OR REPLACE INTO meta VALUES ('cooldown', ?)", (time.time() + cooldown,))
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def _retry_after(err, attempt):
+    try:
+        return min(float(err.headers.get("Retry-After")), 120)
+    except (TypeError, ValueError, AttributeError):
+        return min(2 ** attempt * 2, 30) + random.uniform(0, 1)  # 2, 4, 8, 16 s + jitter
+
+
+def _fetch(url):
+    """One API answer: client-side throttling, Retry-After / exponential backoff on 429 and 5xx, retries on network errors,
+    all within WAIT seconds; RateLimited when the limit doesn't clear in time."""
+    deadline = time.time() + WAIT
+    req = urllib.request.Request(url, headers={"User-Agent": "ao-db (github.com/valorouscat/ao-db)", "Accept-Encoding": "gzip"})
+    for attempt in range(6):
+        wait = _wait_for_slot()
+        if wait:
+            if time.time() + wait > deadline:
+                raise RateLimited(f"Market API rate limit (HTTP 429) — cooling down for {wait:.0f} s more")
+            time.sleep(wait)
+        _log_request()
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = resp.read()
+                if resp.headers.get("Content-Encoding") == "gzip":
+                    body = gzip.decompress(body)
+            return json.loads(body)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500:
+                raise AOError(f"Market API request failed: {e}")
+            pause = _retry_after(e, attempt)
+            if e.code == 429:  # wait through the shared cool-down (other processes back off too instead of hammering the API)
+                _log_request(cooldown=pause)
+                continue
+            if time.time() + pause > deadline:
+                raise AOError(f"Market API request failed: {e}")
+            time.sleep(pause)
+        except (urllib.error.URLError, OSError, ValueError) as e:  # network failure is a user-facing condition
+            if attempt >= 2 or time.time() + 2 ** attempt > deadline:
+                raise AOError(f"Market API request failed: {e}")
+            time.sleep(2 ** attempt)
+    raise RateLimited("Market API rate limit (HTTP 429) — try again in a few minutes")
 
 
 def _get(kind, ids, server, **params):
+    """API rows for `ids`, cached per item: fresh answers come from the cache, only the missing items are requested (in
+    URL-sized batches). When the API fails, items fall back to their last cached answer of any age (reported in WARNINGS);
+    raises only when no item has any data."""
     if server not in SERVERS:
         raise AOError(f"server must be one of {SERVERS}")
-    url = API.format(srv=server, kind=kind, ids=urllib.parse.quote(",".join(ids), safe=",@")) + "?" + urllib.parse.urlencode(
-        {k: v for k, v in params.items() if v})
-    hit = _cache.get(url)
-    if hit and time.time() - hit[0] < 300:
-        return hit[1]
-    cpath = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".json")
-    try:  # disk cache shared by CLI runs and the MCP server
-        if time.time() - os.path.getmtime(cpath) < 600:
-            with open(cpath, encoding="utf-8") as fh:
-                data = json.load(fh)
-            _cache[url] = (time.time(), data)
-            return data
-    except (OSError, ValueError):
-        pass
-    req = urllib.request.Request(url, headers={"User-Agent": "ao-db (github.com/valorouscat/ao-db)", "Accept-Encoding": "identity"})
-    for attempt in range(3):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.load(resp)
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 1:  # API limit: 180 req/min, 300 req/5 min (shared per IP)
-                time.sleep(3)
+    ids = list(dict.fromkeys(ids))
+    params = {k: v for k, v in params.items() if v}
+    base = f"{kind}|{server}|{json.dumps(params, sort_keys=True)}|"
+    keys = {i: base + i for i in ids}
+    now, got = time.time(), {}
+    for i, k in keys.items():
+        hit = _mem.get(k)
+        if hit and now - hit[0] < TTL[kind]:
+            got[i] = hit[1]
+    disk = _cached([keys[i] for i in ids if i not in got])
+    for i in ids:
+        d = disk.get(keys[i])
+        if i not in got and d and d[1] < TTL[kind]:
+            got[i] = d[0]
+            _mem[keys[i]] = (now - d[1], d[0])
+    need = [i for i in ids if i not in got]
+    batches, cur = [], []
+    for i in need:
+        if cur and len(",".join(cur + [i])) > URL_IDS_MAX:
+            batches.append(cur)
+            cur = []
+        cur.append(i)
+    batches += [cur] if cur else []
+    error = None
+    for b in batches:
+        if error is None:
+            url = API.format(srv=server, kind=kind, ids=urllib.parse.quote(",".join(b), safe=",@")) + "?" + urllib.parse.urlencode(params)
+            try:
+                rows = _fetch(url)
+            except AOError as e:
+                error = e
+            else:
+                per = {i: [] for i in b}
+                for r in rows:
+                    per.setdefault(r.get("item_id"), []).append(r)
+                fresh = {i: per[i] for i in b}
+                got.update(fresh)
+                _store({keys[i]: v for i, v in fresh.items()})
+                for i, v in fresh.items():
+                    _mem[keys[i]] = (time.time(), v)
                 continue
-            if e.code == 429:
-                stale = _stale(cpath)
-                if stale is not None:  # an older answer to the same request beats nothing
-                    WARNINGS.append(f"rate limited — used a cached answer {stale[1]:.0f} min old")
-                    _cache[url] = (time.time(), stale[0])
-                    return stale[0]
-                raise AOError("Market API rate limit (HTTP 429) — try again in a few minutes")
-            raise AOError(f"Market API request failed: {e}")
-        except Exception as e:  # network failure is a user-facing condition
-            raise AOError(f"Market API request failed: {e}")
-    _cache[url] = (time.time(), data)
-    try:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        with open(cpath, "w", encoding="utf-8") as fh:
-            json.dump(data, fh)
-    except OSError:
-        pass
-    return data
+        # API unavailable: an older answer to the same question beats nothing
+        stale = [(i, disk[keys[i]]) for i in b if keys[i] in disk]
+        for i, (v, age) in stale:
+            got[i] = v
+        if stale:
+            WARNINGS.append(f"{error} — used cached {kind} up to {max(a for _, (_, a) in stale) / 3600:.1f} h old for {len(stale)} item(s)")
+        if len(stale) < len(b):
+            WARNINGS.append(f"{error} — no {kind} data for {len(b) - len(stale)} item(s)")
+    if error and not any(got.values()):
+        raise error
+    return [r for i in ids for r in got.get(i, [])]
 
 
-def _stale(cpath):
-    """(data, age in minutes) of a disk-cached answer of any age, or None."""
-    try:
-        with open(cpath, encoding="utf-8") as fh:
-            return json.load(fh), (time.time() - os.path.getmtime(cpath)) / 60
-    except (OSError, ValueError):
-        return None
+def warnings_note():
+    return ("\n\n⚠ " + "; ".join(dict.fromkeys(WARNINGS))) if WARNINGS else ""
 
 
 LAST_PRICES = os.path.join(CACHE_DIR, "last_prices.json")  # {server|city|quality|item: [price, unix time, source]}
@@ -123,12 +243,13 @@ def _ago(ts):
 
 def price(items, server="europe", cities=None, quality=1):
     ids = [resolve_item(x) for x in items]
+    WARNINGS.clear()
     data = _get("prices", ids, server, locations=cities, qualities=quality)
     rows = [(label(d["item_id"]), d["city"], d["quality"], money(d["sell_price_min"] or None), _ago(d["sell_price_min_date"]),
              money(d["buy_price_max"] or None) if d["buy_price_max"] else "", _ago(d["buy_price_max_date"]) if d["buy_price_max"] else "")
             for d in data if d["sell_price_min"] or d["buy_price_max"]]
     return (f"## Market prices ({server}, quality {quality})\n\n" + table(rows, ["item", "city", "q", "sell min", "age", "buy max", "age"]) +
-            "\n\n_Source: albion-online-data.com (crowd-sourced; check the age column)._")
+            "\n\n_Source: albion-online-data.com (crowd-sourced; check the age column)._" + warnings_note())
 
 
 def history_avg(ids, server, cities=None, quality=1, days=7):
@@ -147,6 +268,7 @@ def history_avg(ids, server, cities=None, quality=1, days=7):
 
 def history(item, server="europe", cities=None, quality=1, days=14):
     iid = resolve_item(item)
+    WARNINGS.clear()
     data = _get("history", [iid], server, locations=cities, qualities=quality, **{"time-scale": 24})
     o = [f"## Price history: {label(iid)} ({server}, quality {quality}, last {days} days)\n"]
     summary = []
@@ -160,7 +282,7 @@ def history(item, server="europe", cities=None, quality=1, days=14):
         summary.append((d["location"], money(avg), f"{vol / len(pts):.0f}", money(min(p["avg_price"] for p in pts)),
                         money(max(p["avg_price"] for p in pts)), f"{(last - first) / first:+.0%}" if first else ""))
     o.append(table(sorted(summary, key=lambda r: r[0]), ["city", "avg price", "sold/day", "min day", "max day", "trend"]))
-    return "\n".join(o)
+    return "\n".join(o) + warnings_note()
 
 
 def craft_profit(item, server="europe", city="Caerleon", sell_city=None, return_rate=None, focus=False, station_fee=0.0,
@@ -176,6 +298,7 @@ def craft_profit(item, server="europe", city="Caerleon", sell_city=None, return_
     mats = r["res"]
     ids = [iid] + [m[0] for m in mats]
     cities = ",".join(sorted({city, sell_city}))
+    WARNINGS.clear()
     live = {(d["item_id"], d["city"]): d for d in _get("prices", ids, server, locations=cities, qualities=1)}
     hist = history_avg(ids, server, cities, 1, days)
 
@@ -224,12 +347,13 @@ def craft_profit(item, server="europe", city="Caerleon", sell_city=None, return_
     if missing:
         o.append("\n⚠ No price data for: " + ", ".join(f"`{m}`" for m in missing) + " — profit not computed.")
     o.append(f"\n_Return-rate presets: {RETURN_RATES}. Prices are crowd-sourced; verify before big investments._")
-    return "\n".join(o)
+    return "\n".join(o) + warnings_note()
 
 
 def best_city(item, server="europe", quality=1):
     """Where to buy cheapest / sell highest right now."""
     iid = resolve_item(item)
+    WARNINGS.clear()
     data = [d for d in _get("prices", [iid], server, qualities=quality) if d["sell_price_min"] or d["buy_price_max"]]
     sells = sorted((d for d in data if d["sell_price_min"]), key=lambda d: d["sell_price_min"])
     buys = sorted((d for d in data if d["buy_price_max"]), key=lambda d: -d["buy_price_max"])
@@ -243,7 +367,7 @@ def best_city(item, server="europe", quality=1):
         net = b["buy_price_max"] * (1 - TAX_PREMIUM) - s["sell_price_min"]
         o.append(f"\nFlip: buy in {s['city']} at {money(s['sell_price_min'])} → sell to buy order in {b['city']} at {money(b['buy_price_max'])}: "
                  f"**{money(net)}** after 4% tax (transport risk not included).")
-    return "\n".join(o)
+    return "\n".join(o) + warnings_note()
 
 
 WARNINGS = []  # non-fatal API problems from the last price_map call, shown by callers
@@ -268,34 +392,25 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
     ids = list(dict.fromkeys(ids))
     WARNINGS.clear()
     live, hist = {}, {}
-    live_ok = True
-    for i in range(0, len(ids), 80):
-        try:
-            for d in _get("prices", ids[i:i + 80], server, locations=city, qualities=quality):
-                if d["sell_price_min"]:
-                    live[d["item_id"]] = (d["sell_price_min"], d["sell_price_min_date"])
-        except AOError as e:
-            WARNINGS.append(str(e))
-            live_ok = False
-            break
-    for i in range(0, len(ids), 80) if use_history and live_ok else ():
-        try:
-            hist.update({k[0]: v for k, v in history_avg(ids[i:i + 80], server, city, quality, days).items()})
-        except AOError as e:
-            WARNINGS.append(f"history: {e}")
-            break
-    # cross-city median of fresh listings: fills gaps and catches single overpriced listings — still needed (most of all)
-    # when the history request failed, otherwise a troll listing goes through unchecked
+    # one all-cities request: the price city's own listing + the cross-city median of fresh listings, which fills gaps and
+    # catches single overpriced listings — needed most when the history request failed, else a troll listing goes through
     xcity = defaultdict(list)
-    for i in range(0, len(ids), 80) if live_ok else ():
-        try:
-            for d in _get("prices", ids[i:i + 80], server, qualities=quality):
-                age = _hours(d["sell_price_min_date"])
-                if d["sell_price_min"] and d["city"] != "Black Market" and age is not None and age < 24 * days:
-                    xcity[d["item_id"]].append(d["sell_price_min"])
-        except AOError as e:
-            WARNINGS.append(f"cross-city: {e}")
-            break
+    try:
+        for d in _get("prices", ids, server, qualities=quality):
+            if not d["sell_price_min"]:
+                continue
+            if d["city"] == city:
+                live[d["item_id"]] = (d["sell_price_min"], d["sell_price_min_date"])
+            age = _hours(d["sell_price_min_date"])
+            if d["city"] != "Black Market" and age is not None and age < 24 * days:
+                xcity[d["item_id"]].append(d["sell_price_min"])
+    except AOError as e:
+        WARNINGS.append(str(e))
+    try:
+        if use_history:
+            hist.update({k[0]: v for k, v in history_avg(ids, server, city, quality, days).items()})
+    except AOError as e:
+        WARNINGS.append(f"history: {e}")
     out = {}
     for i in ids:
         lv, hv = live.get(i), hist.get(i)

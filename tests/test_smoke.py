@@ -348,6 +348,75 @@ class Encounters(unittest.TestCase):
         self.assertIn("Camp simulation", encounter.camp_sim(self.BOW, "green", 6, "small", ips="avg=1250"))
 
 
+class MarketCache(unittest.TestCase):
+    """Per-item cache, batching and 429 handling without the network (urlopen is faked)."""
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.patches = [mock.patch.object(market, "CACHE_DIR", d), mock.patch.object(market, "CACHE_DB", os.path.join(d, "m.sqlite")),
+                        mock.patch.object(market, "_mem", {}), mock.patch.object(market.time, "sleep", lambda s: self.slept.append(s))]
+        for p in self.patches:
+            p.start()
+        self.urls, self.slept, self.fail = [], [], 0
+        market.WARNINGS.clear()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def _urlopen(self, req, timeout=None):
+        import io, urllib.error
+        self.urls.append(req.full_url)
+        if self.fail:
+            self.fail -= 1
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"Retry-After": "5"}, io.BytesIO())
+        ids = req.full_url.split("/prices/")[1].split(".json")[0].split(",")
+        body = json.dumps([{"item_id": i, "city": "Caerleon", "sell_price_min": 100} for i in ids]).encode()
+        resp = mock.MagicMock(headers={})
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        return resp
+
+    def test_cache_per_item_and_429(self):
+        with mock.patch.object(market.urllib.request, "urlopen", self._urlopen):
+            self.assertEqual(len(market._get("prices", ["T4_BAG", "T5_BAG"], "europe")), 2)
+            market._get("prices", ["T5_BAG", "T6_BAG"], "europe")
+            self.assertIn("/prices/T6_BAG.json", self.urls[-1])                      # only the uncached item is requested
+            self.fail = 1
+            self.assertEqual(len(market._get("prices", ["T7_BAG"], "europe")), 1)    # waits Retry-After, then succeeds
+            self.assertAlmostEqual(sum(self.slept), 5.0, places=1)
+            market._mem.clear()
+            with mock.patch.object(market, "TTL", {"prices": -1}), mock.patch.object(market, "WAIT", 1):
+                self.fail = 9
+                rows = market._get("prices", ["T4_BAG", "T8_BAG"], "europe")          # 429 → stale cache, gap reported
+                self.assertEqual([r["item_id"] for r in rows], ["T4_BAG"])
+                self.assertTrue(any("used cached" in w for w in market.WARNINGS))
+                self.assertTrue(any("no prices data for 1" in w for w in market.WARNINGS))
+                n = len(self.urls)
+                market._get("prices", ["T4_BAG"], "europe")                          # cool-down: no new request
+                self.assertEqual(len(self.urls), n)
+                with self.assertRaises(market.RateLimited):
+                    market._get("prices", ["T8_BAG"], "europe")
+
+    def test_batches(self):
+        ids = [f"T4_ITEM_NUMBER_{i:04d}" for i in range(400)]
+        with mock.patch.object(market.urllib.request, "urlopen", self._urlopen):
+            self.assertEqual(len(market._get("prices", ids, "europe")), 400)
+        self.assertGreater(len(self.urls), 1)
+        self.assertTrue(all(len(u) < 3300 for u in self.urls))
+
+
+class Cli(unittest.TestCase):
+    def test_help_and_quantity_words(self):
+        from aodb import cli
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            cli.main(["-h"])                                                            # help texts contain '%'
+        self.assertIn("craft_profit", out.getvalue())
+        fake = lambda ids, *a, **k: {i: (1000, "live") for i in ids}
+        with mock.patch.object(market, "price_map", fake):
+            self.assertIn("| 3 |", advisor.build_cost(["T4_BAG", "3x", "T7_MEAL_ROAST"], compare_enchants=False))
+
+
 @unittest.skipUnless(os.environ.get("AO_NET"), "set AO_NET=1 to test the live market API")
 class Market(unittest.TestCase):
     def test_price_and_profit(self):

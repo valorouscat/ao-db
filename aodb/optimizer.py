@@ -60,7 +60,7 @@ def _loadout(wfam, kit, level, cheap):
 
 
 def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100, server="europe", city="Caerleon", pages=20,
-                    shortlist=10, levels=None):
+                    shortlist=10, levels=None, budget=None, top=4):
     """Rank builds for a PvPvE content by score and by score per silver, in budget bands."""
     key = encounter.resolve(content)
     title, kind, dtier, zone, continent = encounter.CONTENT[key]
@@ -154,7 +154,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
                 x = evaluate(r["wfam"], next(k for k in KITS if k[0] == r["kit"]), lv)
                 x["score"] = score(x)
                 results.append(x)
-    priced = [r for r in results if r["cost"] and not r["missing"]]
+    priced = [r for r in results if r["cost"] and not r["missing"] and (not budget or r["cost"] <= budget)]
     for r in priced:
         r["eff"] = r["score"] / (r["cost"] / 100_000)
 
@@ -175,15 +175,15 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
          f"{WEIGHTS['pve_speed']:.0%} fame/h + {WEIGHTS['pvp_win']:.0%} PvP win + {WEIGHTS['pvp_live']:.0%} PvP survival."]
     if warn:
         o.append(f"_Prices incomplete: {'; '.join(warn)}_")
-    for lo_b, hi_b in BANDS:
+    for lo_b, hi_b in [(0, budget + 1)] if budget else BANDS:
         band = [r for r in priced if lo_b <= r["cost"] < hi_b]
         if not band:
             continue
-        top = sorted(band, key=lambda r: -r["score"])[:4]
-        rng = f"{money(lo_b)}–{money(hi_b)}" if hi_b < 10 ** 12 else f"{money(lo_b)}+"
-        o.append(f"\n### Budget {rng}\n" + table([row(r) for r in top], hdr))
+        best_band = sorted(band, key=lambda r: -r["score"])[:top]
+        rng = (f"≤ {money(budget)}" if budget else f"{money(lo_b)}–{money(hi_b)}") if hi_b < 10 ** 12 else f"{money(lo_b)}+"
+        o.append(f"\n### Budget {rng}\n" + table([row(r) for r in best_band], hdr))
         o.append("Buy (leader): " + ", ".join(f"`{e['item']}`" + (f" ×{e['stack']}" if e.get("stack", 1) > 1 else "")
-                                               for e in top[0]["loadout"]["equipment"]))
+                                               for e in best_band[0]["loadout"]["equipment"]))
     eff = sorted(priced, key=lambda r: -r["eff"])[:5]
     o.append("\n### Best value (score per 100k silver, any budget)\n" + table([row(r) for r in eff], hdr))
     top = max(priced, key=lambda r: r["score"]) if priced else None

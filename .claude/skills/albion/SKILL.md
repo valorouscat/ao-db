@@ -57,7 +57,8 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
 3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
    (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
    comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.
-   Market API rate limited? Say so, give the item list, and use `history` or `price` later.
+   Market API rate limited? Prices are cached per item and the tools wait out short 429 cool-downs (`AO_MARKET_WAIT`);
+   when a result still warns about stale or estimated (≈/~) prices, say so and re-run `build_cost` a few minutes later.
 4. **Answer format:**
    - **Recommendation** (concrete item IDs, with icons `![](https://render.albiononline.com/v1/item/<ID>.png?size=48)`)
    - **Why**: evidence bullets, each with its source (tool + ID, killboard numbers, or a link)

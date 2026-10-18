@@ -164,7 +164,9 @@ TOOLS = [
                      spec_ip=P(I, "IP the player's mastery adds on top of base item power", 100),
                      levels=P(S, "Base IP levels to try, comma separated", "800,900,1000,1100,1200"),
                      server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
-                     pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10))),
+                     pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10),
+                     budget=P(I, "Max re-gear cost in silver: one band up to it instead of the fixed bands"),
+                     top=P(I, "Builds shown per budget band", 4))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "

@@ -203,8 +203,14 @@ def _parse_entry(s):
 def build_cost(items, server="europe", city="Caerleon", quality=1, compare_enchants=True):
     if not items:
         raise AOError("Give the build as a list of items, e.g. ['T8_2H_BOW', 'T8_HEAD_LEATHER_SET1', '10x T8_MEAL_STEW']")
+    merged = []
+    for s in items:  # `ao build_cost 3x T7_MEAL_ROAST` arrives as two words
+        if merged and re.fullmatch(r"\d+\s*[x×]", merged[-1].strip()):
+            merged[-1] += " " + s
+        else:
+            merged.append(s)
     entries = []
-    for s in items:
+    for s in merged:
         name, n = _parse_entry(s)
         iid = resolve_item(name)
         it = q1("SELECT * FROM items WHERE id=?", iid)
