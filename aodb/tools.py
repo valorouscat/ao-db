@@ -128,6 +128,7 @@ TOOLS = [
                      intents=P(S, "Spell intents per player separated by '|'"), min_hp=P(N, "Lowest HP share during the fight, 0-1"),
                      consumables_used=P(S, "Consumables used, e.g. '2x T6 poison potion'"), notes=P(S, "Free-text notes"),
                      runs=P(I, "How many times this setup cleared this content with this outcome (repeat confirmations)", 1),
+                     mastery=P(I, "Average mastery/spec level of the gear (info; the IP values already include it)"),
                      save=P(B, "Write to the journal (false = dry run)", True))),
     dict(name="calibration", fn=gearcheck.calibration,
          desc="Calibration journal: every recorded real outcome vs the current model's raw margin, and the offset applied.", params={}),

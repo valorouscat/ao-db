@@ -49,9 +49,10 @@ DODGE_LOW = 0.5      # pessimistic scenario
 KITE = 0.5           # ranged player vs melee mobs: share of melee auto-attack damage still taken
 DEF_BASELINE = 1.3   # defense multiplier of a "typical" kit at par (anchor assumption)
 BASE_HP = 1200       # character base max health (no gear)
-ARMOR_HP_1000 = 600  # ASSUMED total max-health bonus of head+armor+shoes at 1000 IP (split by gamedata hitpointsshare
-                     # head .25 / armor .5 / shoes .25, ×1.06 per +100 IP); the absolute value is not in the dump —
-                     # pass the in-game HP (hp=...) for exact numbers
+ARMOR_HP_1000 = 1150  # total max-health bonus of head+armor+shoes at 1000 IP (split by gamedata hitpointsshare
+                      # head .25 / armor .5 / shoes .25, ×1.06 per +100 IP). Not in the dump: calibrated on a real character
+                      # (leather set at ~1212 armor IP incl. mastery = 2500 HP in game, no HP food; knowledge/calibration.json).
+                      # Pass the in-game HP (hp=...) for exact numbers
 SUSTAIN_FLOOR = 0.35 # incoming damage after defenses never drops below 35% of raw (defense multiplier ≤ ×2.9)
 CC_CAP_SPELL = 0.25  # one spell keeps the pull disabled at most 25% of the time
 CC_CAP_GROUP = 0.35
@@ -880,7 +881,7 @@ def calibration_offset():
 
 
 def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=None, min_hp=None, consumables_used=None, notes=None,
-                   runs=1, date=None, save=True):
+                   runs=1, mastery=None, date=None, save=True):
     """Add a real fight outcome to the calibration journal; returns the model's raw margin for it and the new offset."""
     if isinstance(loadouts, (str, dict)):
         loadouts = [loadouts]
@@ -894,7 +895,7 @@ def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=No
            "stage": stage, "outcome": _norm_outcome(outcome), "loadouts": los,
            "ips": ips if isinstance(ips, list) or ips is None else str(ips),
            "intents": (intents if isinstance(intents, list) else str(intents).split("|")) if intents else None,
-           "runs": int(runs or 1), "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
+           "runs": int(runs or 1), "mastery": mastery, "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
     try:
         from . import patchnotes
         d_, t_ = patchnotes.current_patch()

@@ -7,6 +7,13 @@
    "tier": 6,
    "stage": "large",
    "outcome": "easy",
+   "runs": 3,
+   "mastery": 80,
+   "min_hp": 0.4,
+   "consumables_used": "2x Poison Potion 6.0",
+   "notes": "Avalonian Knight ~13k HP; confident, repeatable: several large chests cleared with this setup (recorded as 3 = minimum of 'several'); slow but easy, Bloodlust heals back. In-game: average mastery 80, average IP 1225, weapon IP 1300, max HP 2500 (food = Roast Pork lifesteal, no HP buff)",
+   "ips": "avg=1225,mainhand=1300,hp=2500",
+   "intents": null,
    "loadouts": [
     {
      "version": 1,
@@ -123,13 +130,7 @@
       }
      ]
     }
-   ],
-   "ips": "avg=1250,mainhand=1300",
-   "intents": null,
-   "min_hp": 0.4,
-   "consumables_used": "2x Poison Potion 6.0",
-   "notes": "Avalonian Knight ~13k HP; confident, repeatable: several large chests cleared with this setup (recorded as 3 = minimum of 'several'); slow but easy, Bloodlust heals back",
-   "runs": 3
+   ]
   }
  ]
 }
