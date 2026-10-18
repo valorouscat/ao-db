@@ -95,6 +95,11 @@ TOOLS = [
          params=dict(weapon=P(S, "Weapon to drill into (optional)"), server=P(S, "Game server", "europe", enum=list(advisor.GAMEINFO)),
                      pages=P(I, "Pages of 51 events (1-20)", 10), min_ip=P(I, "Ignore players below this average IP", 0),
                      top=P(I, "Rows", 12))),
+    dict(name="difficulty", fn=advisor.difficulty,
+         desc="Reward multipliers (loot ×, silver ×, fame ×), mob buffs (HP/damage) and entry rules per content type and level, from the "
+              "game files: dungeon enchant .1-.4 and boss rooms, zone colour and Outlands region quality, mists, depths, dragon areas, "
+              "expeditions, corrupted dungeons, hellgates, tier scaling, market taxes. No argument = overview.",
+         params=dict(content=P(S, "Content: " + ", ".join(advisor.DIFFICULTY) + " (RU/EN aliases ok)"))),
     dict(name="mechanics", fn=advisor.mechanics,
          desc="Official in-game descriptions and data files for a content type: " + ", ".join(advisor.TOPICS) + ".",
          params=dict(topic=P(S, "Topic", required=True), limit=P(I, "Max texts", 25))),

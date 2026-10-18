@@ -355,7 +355,118 @@ def mechanics(topic, limit=25):
             o.append(f"\n### Data file `{f}`\n" + ", ".join(f"`{r['key']}`" for r in keys) + "\n_Read with doc(file, key)._")
     if chests:
         o.append("\n### Related chest types (value analysis: chest_value)\n" + ", ".join(f"`{c}`" for c in chests))
-    o.append("\n_These are the game's own descriptions. For strategy/meta, combine with notes, meta_builds and a recent web search._")
+    o.append("\n_These are the game's own descriptions; tutorial texts can lag behind balance changes (e.g. corrupted dungeon IP "
+             "requirements). Cross-check numbers with difficulty (game data) and patchnotes; for strategy combine with notes, "
+             "meta_builds and a recent web search._")
+    return "\n".join(o)
+
+
+# ------------------------------------------------------------------ reward / difficulty modifiers
+# content alias -> [(source, grp LIKE pattern)]
+DIFFICULTY = {
+    "dungeon": [("difficulty", "default"), ("difficulty", "bossroom%")],
+    "mists": [("difficulty", "mists"), ("zone", "mists%")],
+    "depths": [("difficulty", "helldungeons%"), ("zone", "helldungeon%")],
+    "dragon": [("difficulty", "dragonarea"), ("zone", "dragonarea%")],
+    "expedition": [("expedition", "%"), ("zone", "expedition")],
+    "zone": [("zone", "safe"), ("zone", "yellow"), ("zone", "orange"), ("zone", "red"), ("zone", "black%"), ("zone", "tunnel")],
+    "corrupted": [("corrupted", "%"), ("zone", "corrupted%")],
+    "hellgate": [("hellgate", "%"), ("zone", "hell%")],
+    "tier": [("tier", "%")],
+    "market": [("market", "%")],
+}
+ALIASES = {"solo": "dungeon", "group": "dungeon", "random": "dungeon", "подзем": "dungeon", "мист": "mists", "туман": "mists",
+           "helldungeon": "depths", "abyss": "depths", "глуб": "depths", "ancient": "dragon", "дракон": "dragon",
+           "экспед": "expedition", "region": "zone", "outlands": "zone", "black": "zone", "red": "zone", "зон": "zone",
+           "запредел": "zone", "коррап": "corrupted", "прокля": "corrupted", "хелл": "hellgate", "тир": "tier",
+           "tax": "market", "налог": "market", "рын": "market"}
+
+
+BUFF_NAMES = {"hitpointsmaxbonus": "HP", "bonusdamagevsplayers": "dmg vs players", "mobdamagemodifier": "dmg",
+              "mobhealthmodifier": "HP", "damagebonus": "dmg", "physicalarmor": "armor", "magicresistance": "mres"}
+
+
+def _buff_text(spell_id):
+    """'HP +16%, dmg vs players +16%' from a mob buff spell (buffovertime entries and mob*modifier multipliers)."""
+    if not spell_id:
+        return ""
+    r = q1("SELECT json FROM spells WHERE id=?", spell_id)
+    if not r:
+        return spell_id
+    d = json.loads(r["json"])
+    parts = []
+    for b in _aslist(d.get("buffovertime")):
+        v = core.num(b.get("@value"))
+        if v is not None:
+            parts.append(f"{BUFF_NAMES.get(b.get('@type'), b.get('@type'))} {v:+.0%}")
+    for k in ("mobdamagemodifier", "mobhealthmodifier"):
+        for b in _aslist(d.get(k)):
+            v = core.num(b.get("@value"))
+            if v is not None:
+                parts.append(f"{BUFF_NAMES[k]} {v - 1:+.0%}")
+    return ", ".join(parts) or spell_id
+
+
+def _content_key(content):
+    c = (content or "").lower()
+    if c in DIFFICULTY:
+        return c
+    return next((k for k in DIFFICULTY if k in c), None) or next((v for a, v in ALIASES.items() if a in c), None)
+
+
+def difficulty(content=None):
+    """Reward multipliers (loot, silver, fame), mob buffs and entry rules per content type and level, straight from the game files."""
+    key = _content_key(content)
+    if not key:
+        rows = q("SELECT source, COUNT(*) n, GROUP_CONCAT(DISTINCT grp) g FROM modifiers GROUP BY source")
+        return ("## Difficulty / reward modifiers — pick a content type\n\n" + table([(r["source"], r["n"], r["g"][:120]) for r in rows],
+                                                                                    ["source", "rows", "groups"]) +
+                f"\n\nContent keys: {', '.join(DIFFICULTY)} (aliases in RU/EN work, e.g. 'соло подземелья', 'black zone').")
+    o = [f"## Reward / difficulty modifiers: {key}", ""]
+    by_source = {}
+    for source, pat in DIFFICULTY[key]:
+        by_source.setdefault(source, []).extend(
+            q("SELECT * FROM modifiers WHERE source=? AND grp LIKE ? ORDER BY grp, CAST(level AS REAL), rowid", source, pat))
+    for source, rows in by_source.items():
+        if not rows:
+            continue
+        if source in ("difficulty", "expedition", "zone"):
+            title = {"difficulty": "Instance difficulty levels (randomdungeons.json)", "expedition": "Expedition difficulty (expeditioncategories.json)",
+                     "zone": "Zone / region multipliers (gamedata.json ClusterDangerBonus)"}[source]
+            t = [(r["grp"], r["level"], fmt(r["loot"]), fmt(r["silver"]), fmt(r["fame"]), _buff_text(r["mobbuff"]),
+                  ", ".join(f"{k.replace('factor', '')} ×{v}" for k, v in json.loads(r["extra"] or "{}").items()
+                            if k in ("gatheringfamefactor", "fishingfamefactor") and v not in ("1", None)) or
+                  json.loads(r["extra"] or "{}").get("tokenlootlist", "")) for r in rows]
+            o.append(f"### {title}\n" + table(t, ["group", "level", "loot ×", "silver ×", "fame ×", "mob buff", "other"]))
+            if source == "zone" and any(r["grp"] == "black1" for r in rows):
+                o.append("_safe = blue zone; black1–black6 = Outlands region quality (Q1–Q6, higher towards the centre)._")
+        elif source in ("corrupted", "hellgate"):
+            t = []
+            for r in rows:
+                ex = json.loads(r["extra"] or "{}")
+                t.append((r["grp"], r["level"], ex.get("itempowerrequirement", ""),
+                          "yes" if ex.get("playersarelethalinentranceclusterrequirement") == "true" or "_lethal" in r["grp"].replace("non_lethal", "") else "",
+                          ex.get("infamykillbonus", ""), ex.get("percentbosslootonkill", ""), str(ex.get("rewardconstant", ""))[:7], ex.get("mightreward", "")))
+            o.append(f"### {source.title()} levels\n" + table(t, ["level", "tier" if source == "corrupted" else "team size", "IP required",
+                                                                 "lethal", "infamy/kill bonus", "boss loot % on kill", "reward constant", "might reward"]))
+        elif source == "tier":
+            o.append("### Quest / activity scaling by region tier (gamedata.json)\n" + table([(r["level"], fmt(r["fame"])) for r in rows], ["tier", "scaling ×"]))
+        elif source == "market":
+            o.append("### Marketplace taxes (gamedata.json)\n" + table([(r["level"], json.loads(r["extra"])["value"]) for r in rows], ["tax", "value"]) +
+                     "\n_Premium halves the transaction tax (8% → 4%)._")
+    pn = ""
+    try:
+        from . import patchnotes
+        term = {"dungeon": "randomized dungeon", "zone": "region quality", "depths": "the depths", "dragon": "ancient lands",
+                "market": "marketplace tax", "corrupted": "corrupted dungeon", "hellgate": "hellgate", "mists": "mists",
+                "expedition": "expedition", "tier": "tier"}.get(key, key)
+        pn = patchnotes.top_lines(term, limit=4)
+    except Exception:
+        pass
+    if pn:
+        o.append("\n### Recent patch notes on this content\n" + pn)
+    o.append("\n_Multipliers are relative to the content's base rewards; they stack with tier, chest rarity and zone bonuses where the game applies "
+             "them. Values come from the current data dump (see info for its date)._")
     return "\n".join(o)
 
 

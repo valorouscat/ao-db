@@ -46,6 +46,7 @@ CREATE INDEX loot_target ON loot(target);
 
 CREATE TABLE loot_raw(name TEXT PRIMARY KEY, json TEXT);
 CREATE TABLE chests(name TEXT PRIMARY KEY, chesttype TEXT, faction TEXT, json TEXT);
+CREATE TABLE modifiers(source TEXT, grp TEXT, level TEXT, mobbuff TEXT, loot REAL, silver REAL, fame REAL, extra TEXT);
 CREATE TABLE clusters(idx TEXT PRIMARY KEY, name TEXT, file TEXT, type TEXT, biome TEXT, tier INT, zone TEXT);
 CREATE VIRTUAL TABLE clusters_fts USING fts5(idx, name, file, tokenize='unicode61');
 
@@ -287,6 +288,44 @@ class Builder:
                              for c in aslist(lc.get("LootChest")) if isinstance(c, dict) and "@uniquename" in c])
         self.log("loot rows", len(rows))
 
+    # ---------------------------------------------------------------- reward / difficulty modifiers
+    def build_modifiers(self):
+        rows = []
+
+        def extra(d, skip):
+            return json.dumps({k.lstrip("@"): v for k, v in d.items() if k.startswith("@") and k not in skip}, ensure_ascii=False)
+
+        g = load(self.repo, "gamedata.json")["AO-GameData"]
+        for z in aslist((g.get("ClusterDangerBonusTypes") or {}).get("ClusterDangerBonus")):
+            rows.append(("zone", z.get("@type"), "", z.get("@mobbuff"), num(z.get("@moblootfactor")), num(z.get("@mobsilverlootfactor")),
+                         num(z.get("@famefactor")), extra(z, {"@type", "@icon", "@mobbuff", "@moblootfactor", "@mobsilverlootfactor", "@famefactor"})))
+        for t in aslist((g.get("QuestScalingByClusterTier") or {}).get("Tier")):
+            rows.append(("tier", "quest scaling", t.get("@tier"), None, None, None, num(t.get("@scalingfactor")), "{}"))
+        mp = (g.get("MarketPlace") or {}).get("TaxValues") or {}
+        for t in aslist(mp.get("TaxFactor")):
+            rows.append(("market", "tax", t.get("@name"), None, None, None, None, json.dumps({"value": t.get("@value")})))
+        rd = load(self.repo, "randomdungeons.json")["randomdungeons"]
+        for grp in aslist((rd.get("DifficultyLevels") or {}).get("difficultygroup")):
+            for d in aslist(grp.get("difficulty")):
+                rows.append(("difficulty", grp.get("@name"), d.get("@level"), d.get("@mobmodifier"), num(d.get("@lootfactor")),
+                             num(d.get("@silverfactor")), num(d.get("@mobfamefactor")),
+                             extra(d, {"@level", "@mobmodifier", "@lootfactor", "@silverfactor", "@mobfamefactor"})))
+        for cat in aslist(load(self.repo, "expeditioncategories.json")["expeditioncategories"].get("expeditioncategory")):
+            for d in aslist((cat.get("difficultylevels") or {}).get("difficulty")):
+                rows.append(("expedition", f"{cat.get('@uniquename')} (T{cat.get('@tier')} {cat.get('@grouptype')})", d.get("@level"),
+                             d.get("@mobmodifier"), num(d.get("@lootfactor")), num(d.get("@silverfactor")), num(d.get("@mobfamefactor")),
+                             extra(d, {"@level", "@mobmodifier", "@lootfactor", "@silverfactor", "@mobfamefactor"})))
+        cd = load(self.repo, "corrupteddungeons.json")["corrupteddungeons"]
+        for d in aslist((cd.get("difficulty") or {}).get("difficultylevel")):
+            rows.append(("corrupted", d.get("@name"), d.get("@tier"), None, None, None, None,
+                         extra(d, {"@name", "@tier", "@displayname", "@clustertype"})))
+        hg = load(self.repo, "hellgate.json")["hellgates"]
+        for m in aslist((hg.get("hellgatemodes") or {}).get("hellgatemode")):
+            rows.append(("hellgate", m.get("@name"), m.get("@teamsize"), None, None, None, None,
+                         extra(m, {"@name", "@teamsize"})))
+        self.db.executemany("INSERT INTO modifiers VALUES(?,?,?,?,?,?,?,?)", rows)
+        self.log("modifiers", len(rows))
+
     # ---------------------------------------------------------------- clusters
     def build_clusters(self):
         world = load(self.repo, "formatted/world.json")
@@ -394,6 +433,7 @@ class Builder:
         self.build_spells()
         self.build_mobs()
         self.build_loot()
+        self.build_modifiers()
         self.build_clusters()
         self.build_docs()
         rev = os.popen(f"git -C '{self.repo}' log -1 --format='%h %cs %s' 2>/dev/null").read().strip()

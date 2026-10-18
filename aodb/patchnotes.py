@@ -184,8 +184,18 @@ def last_major():
 
 
 # ------------------------------------------------------------------ tools
-def patchnotes(query, since=None, limit=6, max_chars=1500):
-    """Most relevant sections (exact phrase > all words > any word), shown newest first."""
+def top_lines(query, limit=4):
+    """One line per most relevant section (newest first) — compact 'recent changes' for other tools."""
+    try:
+        rows = _select(query, None, limit)
+    except (AOError, sqlite3.OperationalError):
+        return ""
+    return "\n".join(f"- {r['date']} **{r['title']}** › {r['heading'] or 'intro'}: {_snippet(r['text'], query.split()[0], 220)} ([src]({r['url']}))"
+                     for r in rows)
+
+
+def _select(query, since, limit):
+    """Most relevant sections (heading match > exact phrase > all words > prefixes > any word), newest first."""
     words = core.fts_query(query, prefix=False).split()
     phrase = f'"{" ".join(w.strip(chr(34)) for w in words)}"'
     # a section whose heading names the topic is the most on-topic source; then phrase / all words / prefixes
@@ -206,10 +216,18 @@ def patchnotes(query, since=None, limit=6, max_chars=1500):
         if len(picked) >= limit:
             break
     if not picked:
-        return f"No patch notes mention {query!r}" + (f" since {since}" if since else "") + f". Latest stored: {latest_title()}."
+        return []
     rows = sorted(picked[:max(limit * 2, 10)], key=lambda r: r["date"], reverse=True)[:limit]
-    if picked and rows and picked[0]["id"] not in {r["id"] for r in rows}:
+    if rows and picked[0]["id"] not in {r["id"] for r in rows}:
         rows[-1] = picked[0]  # never drop the single most relevant section
+    return rows
+
+
+def patchnotes(query, since=None, limit=6, max_chars=1500):
+    """Most relevant sections, shown newest first."""
+    rows = _select(query, since, limit)
+    if not rows:
+        return f"No patch notes mention {query!r}" + (f" since {since}" if since else "") + f". Latest stored: {latest_title()}."
     o = [f"## Patch notes about “{query}” (most relevant, newest first; latest stored patch: {latest_title()})", ""]
     for r in rows:
         text = r["text"] if len(r["text"]) <= max_chars else r["text"][:max_chars] + " …"

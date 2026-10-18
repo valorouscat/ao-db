@@ -64,6 +64,17 @@ class Advisor(unittest.TestCase):
         self.assertIn("Estimated total: 12,000", t)
         self.assertIn("other enchantments", t)
 
+    def test_difficulty(self):
+        t = advisor.difficulty("соло подземелья")
+        self.assertIn("1.43", t)            # .1 loot factor
+        self.assertIn("HP +84%", t)         # .4 mob buff
+        z = advisor.difficulty("black zone")
+        self.assertIn("black6", z)
+        self.assertIn("dmg +25%", z)
+        self.assertIn("1100", advisor.difficulty("corrupted"))  # Slayer base IP (Abyssal Depths)
+        self.assertIn("transactiontax", advisor.difficulty("market"))
+        self.assertIn("Content keys", advisor.difficulty())
+
     def test_mechanics_and_notes(self):
         self.assertIn("Infamy", advisor.mechanics("corrupted"))
         with tempfile.TemporaryDirectory() as d, mock.patch.object(advisor, "KNOWLEDGE", d):

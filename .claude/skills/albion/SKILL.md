@@ -27,7 +27,8 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
    pick sensible defaults and say so (e.g. europe server, T8-equivalent 1200+ IP for Slayer corrupted dungeons).
 2. **Collect evidence — at least three independent kinds:**
    - Game rules: `mechanics <topic>` (official texts: IP requirements, rules, rewards), `doc` on the topic's data file.
-   - Game numbers: `chest_value` (loot value ranking), `mob` (HP/damage of the content's mobs), `spell`, `item` stats.
+   - Game numbers: `difficulty <content>` (loot/silver/fame multipliers, mob buffs, IP requirements per level and zone),
+     `chest_value` (loot value ranking), `mob` (HP/damage of the content's mobs), `spell`, `item` stats.
    - Real usage: `meta_builds` (killboard: K/D and what players of a weapon wear). It's PvP data, so say so for PvE questions.
    - Official changes: `patchnotes <topic>` (and `since=<date of a source>` to see what changed after it).
    - Community knowledge: `notes <query>` first, then WebSearch (2+ sources, prefer the current patch and year,
@@ -49,5 +50,7 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
 - Item IDs `T<tier>_<NAME>[@<enchant>]`; enchanted resources `T5_ORE_LEVEL2@2`; queries accept `8.3 claymore`, `палаш`.
 - Quality adds IP: good +20, outstanding +40, excellent +60, masterpiece +100.
 - Return rate: royal city 15.2% / 43.5% with focus; bonus city 24.8% / 47.9%. Market tax 4% premium / 8% otherwise + 2.5% setup fee.
-- Corrupted dungeons (official text): Hunter = blue/yellow, 800 IP, no item loss; Stalker = red/black, 900 IP, full loot;
-  Slayer = red/black, 1200 IP, Might, full loot.
+- Corrupted dungeons: Hunter = blue/yellow, no item loss; Stalker = red/black, full loot; Slayer = red/black, Might, full loot.
+  Entry uses **base** IP: 700 / 900 / 1100 (Abyssal Depths, 2025-06-30; game data agrees). The in-game tutorial text still says
+  800/900/1200 — it is outdated. Since then loot no longer scales with Infamy; Infamy fame scaling max 20%.
+- In-game texts (`mechanics`) can lag behind changes: cross-check numbers with `difficulty` (game data) and `patchnotes`.

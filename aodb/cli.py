@@ -20,7 +20,7 @@ def build_parser():
                 # a single required text arg swallows the rest of the line: `ao item 6.1 broadsword`
                 nargs = "+" if v["type"] == "array" or len(req) == 1 else None
                 p.add_argument(k, nargs=nargs, help=h)
-            elif k in ("query", "text") and not req:  # optional free text: `ao notes avalon chests`
+            elif k in ("query", "text", "content") and not req:  # optional free text: `ao notes avalon chests`
                 p.add_argument(k, nargs="*", help=h)
             elif v["type"] == "boolean":
                 p.add_argument("--" + k.replace("_", "-"), dest=k, action=argparse.BooleanOptionalAction, default=v["default"], help=h)
