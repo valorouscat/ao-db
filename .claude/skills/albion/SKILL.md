@@ -51,6 +51,13 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
    - **Sources**: links used
 5. **Learn.** Save a verified, non-obvious finding with `save_note` (title, body, sources). Never save a note without sources.
 
+## Content assessments must use the concrete monsters
+Any "can I/we do X" answer is built on the actual mobs of that content (gear_check / group_check do this: map templates →
+guards per chest stage → each mob's HP, auto-attack + ability DPS, armor/mres, pulls by position, all template variants).
+In the answer, name the hardest pull (which mobs) and the telegraphed mechanics. Never estimate only from "intended group size".
+When the user describes spells in words ("Q W на урон", "хил на E"), pass that as `intents`; the tool picks the matching
+spells per slot and shows them (marked *) — confirm the pick in the answer.
+
 ## Facts to keep straight
 - Item IDs `T<tier>_<NAME>[@<enchant>]`; enchanted resources `T5_ORE_LEVEL2@2`; queries accept `8.3 claymore`, `палаш`.
 - Quality adds IP: good +20, outstanding +40, excellent +60, masterpiece +100.

@@ -49,7 +49,7 @@ CREATE TABLE chests(name TEXT PRIMARY KEY, chesttype TEXT, faction TEXT, json TE
 CREATE TABLE modifiers(source TEXT, grp TEXT, level TEXT, mobbuff TEXT, loot REAL, silver REAL, fame REAL, extra TEXT);
 CREATE TABLE spawnbehaviors(name TEXT PRIMARY KEY, faction TEXT, mobs TEXT);
 CREATE TABLE chest_upgrades(name TEXT PRIMARY KEY, marker TEXT, stages TEXT, json TEXT);
-CREATE TABLE camps(template TEXT, layer TEXT, chest_tile TEXT, chest_behaviour TEXT, spawns TEXT);
+CREATE TABLE camps(template TEXT, layer TEXT, chest_tile TEXT, chest_behaviour TEXT, spawns TEXT, guards TEXT);
 CREATE INDEX camps_beh ON camps(chest_behaviour);
 CREATE TABLE clusters(idx TEXT PRIMARY KEY, name TEXT, file TEXT, type TEXT, biome TEXT, tier INT, zone TEXT);
 CREATE VIRTUAL TABLE clusters_fts USING fts5(idx, name, file, tokenize='unicode61');
@@ -200,11 +200,20 @@ class Builder:
             for u in aslist((data.get("upgraderequirements") or {}).get("upgraderesource")):
                 urows.append((iid, u.get("@uniquename"), num(u.get("@count"), int)))
             if not ench:
-                csl, seen = it.get("craftingspelllist") or {}, set()
-                while isinstance(csl, dict) and csl.get("@reference") and csl["@reference"] not in seen:
-                    seen.add(csl["@reference"])
-                    csl = byid.get(csl["@reference"], (None, {}))[1].get("craftingspelllist") or {}
-                for s in aslist(csl.get("craftspell") if isinstance(csl, dict) else None):
+                # own spells (e.g. an artifact's unique ability) + everything inherited through @reference chains
+                csl, seen, spells_ = it.get("craftingspelllist") or {}, set(), []
+                while isinstance(csl, dict):
+                    spells_ += aslist(csl.get("craftspell"))
+                    ref = csl.get("@reference")
+                    if not ref or ref in seen:
+                        break
+                    seen.add(ref)
+                    csl = byid.get(ref, (None, {}))[1].get("craftingspelllist") or {}
+                have = set()
+                for s in spells_:
+                    if not isinstance(s, dict) or s.get("@uniquename") in have:
+                        continue
+                    have.add(s.get("@uniquename"))
                     srows.append((iid, s.get("@uniquename"), s.get("@slots"), s.get("@tag")))
         self.db.executemany(f"INSERT OR REPLACE INTO items VALUES({','.join('?'*20)})", irows)
         self.db.executemany("INSERT INTO items_fts VALUES(?,?,?,?,?,?)", frows)
@@ -361,15 +370,27 @@ class Builder:
                 continue
             for lm in re.finditer(r'<layer id="[^"]*" name="([^"]*)">(.*?)</layer>', txt, re.S):
                 body = lm.group(2)
-                chests = re.findall(r'tile name="(SpawnPoint_LOOTCHEST[^"]*)"', body)
+                chests = [(m.group(1), float(m.group(2)), float(m.group(3))) for m in
+                          re.finditer(r'tile name="(SpawnPoint_LOOTCHEST[^"]*)" pos="([-\d.]+) [-\d.]+ ([-\d.]+)"', body)]
                 if not chests:
                     continue
-                spawns = {}
-                for sbn in re.findall(r'spawnbehavior="([^"]+)"', body):
-                    spawns[sbn] = spawns.get(sbn, 0) + 1
-                for ct in sorted(set(chests)):
-                    camps.append((os.path.basename(path).replace(".template.xml", ""), lm.group(1), ct, tiles.get(ct), json.dumps(spawns)))
-        self.db.executemany("INSERT INTO camps VALUES(?,?,?,?,?)", camps)
+                guards = []
+                for tm in re.finditer(r'<tile name="[^"]*" pos="([-\d.]+) [-\d.]+ ([-\d.]+)"[^>]*>\s*<mobspawnpoint[^>]*spawnbehavior="([^"]+)"', body):
+                    guards.append([tm.group(3), round(float(tm.group(1)), 1), round(float(tm.group(2)), 1)])
+                # one camp per chest: each guard belongs to its nearest chest (within 45 m)
+                per_chest = {i: [] for i in range(len(chests))}
+                for g in guards:
+                    d2, i = min(((g[1] - c[1]) ** 2 + (g[2] - c[2]) ** 2, i) for i, c in enumerate(chests))
+                    if d2 <= 45 ** 2 or g[0].startswith("ROAMING"):
+                        per_chest[i].append(g)
+                for i, (ct, cx, cz) in enumerate(chests):
+                    gs = per_chest[i]
+                    spawns = {}
+                    for g in gs:
+                        spawns[g[0]] = spawns.get(g[0], 0) + 1
+                    camps.append((os.path.basename(path).replace(".template.xml", ""), lm.group(1), ct, tiles.get(ct), json.dumps(spawns),
+                                  json.dumps(gs)))
+        self.db.executemany("INSERT INTO camps VALUES(?,?,?,?,?,?)", camps)
         self.log("spawnbehaviors", len(rows), "chest upgrades", len(up), "camps", len(camps))
 
     # ---------------------------------------------------------------- clusters

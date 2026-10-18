@@ -113,12 +113,28 @@ class GearCheck(unittest.TestCase):
         self.assertEqual({r[0]: r[1] for r in rows}["head"], 1200)
 
     def test_camp_model(self):
-        prof = gearcheck.content_profile("AVALON_SMALL_SOLO", [6])
-        self.assertEqual([p["stage"] for p in prof], [0, 1, 2])
-        self.assertLess(prof[0]["F"], prof[2]["F"])  # guards upgrade with the chest
+        ev = gearcheck.content_eval("AVALON_SMALL_SOLO", 6, gearcheck.NEUTRAL_MIX, True)
+        self.assertEqual([st["stage"] for st in ev], [0, 1, 2])
+        med = lambda st: sorted(e["F"] for e in st["evals"])[len(st["evals"]) // 2]
+        self.assertLess(med(ev[0]), med(ev[2]))                       # guards upgrade with the chest
+        self.assertTrue(all(5 <= e["guards"] <= 20 for e in ev[0]["evals"]))  # one camp per chest, not the whole template
+        self.assertAlmostEqual(gearcheck.needed_ip(gearcheck.anchor_F(6), 6), 900, places=6)
         t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
         self.assertIn("Invisibility Potion", t)
-        self.assertIn("verdict", t)
+        self.assertIn("Hardest pull", t)
+
+    def test_spell_damage_engine(self):
+        from aodb import combat
+        self.assertEqual(combat.spell_profile("MULTISHOT2")["dmg"], 116)          # vs mobs, not the PvP value 94
+        self.assertAlmostEqual(combat.spell_profile("LIGHTNING_ARROW")["dmg"], 504, delta=1)  # 24 ticks × 21 (patch 2026-03)
+        self.assertTrue(combat.spell_profile("THORNSAREA")["aoe"])
+        self.assertIn("LIGHTNING_ARROW", [x[0] for x in combat.weapon_spells("T6_2H_BOW_KEEPER")["3"]])  # artifact's own E
+
+    def test_intents(self):
+        self.assertEqual(gearcheck.parse_intents("Q W на урон"), {"1": "damage", "2": "damage"})
+        _, e = gearcheck.parse_loadout(json.dumps({"equipment": [{"item": "T4_MAIN_NATURESTAFF_KEEPER@1"}]}))
+        gearcheck.apply_intents(e, gearcheck.parse_intents("q w на урон"))
+        self.assertEqual(e[0]["active"][:2], ["THORNSAREA", "BRAMBLESEED"])
 
 
 class GroupCheck(unittest.TestCase):
@@ -137,8 +153,7 @@ class GroupCheck(unittest.TestCase):
         self.assertGreater(ip(trio), ip(duo))
         self.assertIn("no tank", duo)
         self.assertIn("Loot per player", trio)
-        solo_anchor = gearcheck.required_ip({"tier": 6, "F": gearcheck.anchor_F(6)})
-        self.assertAlmostEqual(solo_anchor, 900, places=6)
+        self.assertIn("Hardest pull", trio)
 
 
 class PatchNotes(unittest.TestCase):
