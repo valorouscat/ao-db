@@ -39,4 +39,3 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
 - Return rate: royal city 15.2% / 43.5% with focus; bonus city 24.8% / 47.9%. Market tax 4% premium / 8% otherwise + 2.5% setup fee.
 - Corrupted dungeons (official text): Hunter = blue/yellow, 800 IP, no item loss; Stalker = red/black, 900 IP, full loot;
   Slayer = red/black, 1200 IP, Might, full loot.
-- Roads of Avalon chests: green = solo, blue = groups up to 5, gold = 5+ (chest names: SOLO / VETERAN / ELITE).
