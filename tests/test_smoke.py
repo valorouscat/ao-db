@@ -356,6 +356,25 @@ class Encounters(unittest.TestCase):
         self.assertTrue(market._absurd("T8_POTION_CLEANSE", 13_000_000))           # troll listing
         self.assertFalse(market._absurd("T8_POTION_CLEANSE", 15_000))
 
+    def test_meta_kits(self):
+        self.assertEqual(optimizer.armor_spells("ARMOR_CLOTH_SET2"), ("LIFESAVIOR", "PASSIVE_ARMOR_INCREASED_DAMAGE"))
+        act, pas = optimizer.armor_spells("ARMOR_PLATE_AVALON")                 # artifact armor: actives and passives mixed in data
+        self.assertFalse(act.startswith("PASSIVE_"))
+        self.assertTrue(pas.startswith("PASSIVE_"))
+        kill = lambda h, a, sh, cape: {"numberOfParticipants": 1, "Killer": {"Equipment": {
+            "Head": {"Type": h}, "Armor": {"Type": a}, "Shoes": {"Type": sh}, "Cape": {"Type": cape}}}}
+        evs = [kill("T6_HEAD_LEATHER_SET2", "T6_ARMOR_CLOTH_SET2", "T6_SHOES_PLATE_SET1", "T6_CAPEITEM_FW_MARTLOCK@1")] * 3 + \
+              [kill("T6_HEAD_CLOTH_SET3", "T6_ARMOR_CLOTH_SET2", "T6_SHOES_PLATE_SET2", "T6_CAPE")] * 5 + \
+              [kill("T6_HEAD_PLATE_SET1", "T6_ARMOR_PLATE_SET1", "T6_SHOES_PLATE_SET1", "T6_CAPE")]
+        with mock.patch.object(advisor, "_events", lambda *a, **k: evs):
+            kits = optimizer.meta_kits("solo")
+        self.assertEqual(len(kits), 1)                                         # a fixed kit (5 kills) and a 1-kill set are skipped
+        name, pieces, cape, kills = kits[0]
+        self.assertEqual(([f for f, _, _ in pieces], cape, kills), (["HEAD_LEATHER_SET2", "ARMOR_CLOTH_SET2", "SHOES_PLATE_SET1"],
+                                                                    "CAPEITEM_FW_MARTLOCK", 3))
+        lo = optimizer._loadout("2H_DEMONICSTAFF", kits[0], 900, {})
+        self.assertTrue(any("CAPEITEM_FW_MARTLOCK" in e["item"] for e in lo["equipment"]))
+
     def test_optimizer_weights(self):
         w = optimizer._weights("hunter", "pvp_win=1,pve_safe=0,pve_speed=0,pvp_live=0")
         self.assertEqual(w["pvp_win"], 1.0)

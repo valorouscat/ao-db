@@ -3,6 +3,7 @@ the content's monsters (encounter simulation) and against the killboard meta at 
 priced with the cheapest tier/enchant reaching each IP level, ranked by score and by score per silver within budget bands.
 """
 import math, statistics
+from collections import Counter, defaultdict
 from . import advisor, core, combat, encounter, gearcheck, market, pvp
 from .core import AOError, q, q1, label, money, table
 
@@ -35,6 +36,50 @@ PROFILES = {  # what the score rewards: camp safety, fame/h, winning fights, get
     "hunter": {"pve_safe": 0.15, "pve_speed": 0.05, "pvp_win": 0.60, "pvp_live": 0.20},   # look for fights
     "survivor": {"pve_safe": 0.35, "pve_speed": 0.05, "pvp_win": 0.20, "pvp_live": 0.40},  # never lose the bag
 }
+
+
+PASSIVE_PREF = ("PASSIVE_INCREASED_DAMAGE", "PASSIVE_ARMOR_INCREASED_DAMAGE", "PASSIVE_ARMOR_BALANCE", "PASSIVE_BALANCE",
+                "PASSIVE_MR_AR", "PASSIVE_ARMOR_MR_AR")
+
+
+def armor_spells(fam):
+    """(active, passive) for an armor piece the killboard shows without spells: the active with the best PvP value, the
+    passive by preference (damage, then balance, then resistances)."""
+    kit = combat.weapon_spells(q1("SELECT base_id FROM items WHERE id GLOB ?", f"T[4-8]_{fam}")["base_id"])
+    ids = list(dict.fromkeys(o[0] for opts in kit.values() for o in opts))
+    acts = [i for i in ids if not i.startswith("PASSIVE_") and i != "OUTOFCOMBATHEAL"]
+    pas = [i for i in ids if i.startswith("PASSIVE_")]
+    act = max(acts, key=pvp.pvp_value) if acts else None
+    pa = next((x for x in PASSIVE_PREF if x in pas), pas[0] if pas else None)
+    return act, pa
+
+
+def meta_kits(scale, server="europe", pages=20, n=3, fixed=KITS):
+    """The n most common head · armor · shoes sets of killers at a fight scale on the killboard (not already a fixed kit),
+    with the cape most worn with each: [(name, [(family, active, passive)], cape family, kills)]."""
+    sets, capes = Counter(), defaultdict(Counter)
+    for e in advisor._events(server, max(1, min(pages, 20))):
+        if pvp._fight_scale(e) != scale:
+            continue
+        eq = (e.get("Killer") or {}).get("Equipment") or {}
+        fams = tuple(advisor._family((eq.get(s_) or {}).get("Type") or "") for s_ in ("Head", "Armor", "Shoes"))
+        if all(fams):
+            sets[fams] += 1
+            cape = advisor._family((eq.get("Cape") or {}).get("Type") or "")
+            if cape:
+                capes[fams][cape] += 1
+    known = {tuple(f for f, _, _ in k[1]) for k in fixed}
+    out = []
+    for fams, kills in sets.most_common():
+        if len(out) >= n or kills < 2:
+            break
+        if fams in known or not all(q1("SELECT 1 FROM items WHERE id GLOB ?", f"T[4-8]_{f}") for f in fams):
+            continue
+        pieces = [(f, *armor_spells(f)) for f in fams]
+        name = " · ".join(advisor._fam_name(f) for f in fams) + " (killboard)"
+        cape = capes[fams].most_common(1)[0][0] if capes[fams] else "CAPE"
+        out.append((name, pieces, cape, kills))
+    return out
 
 
 def _weights(profile, weights):
@@ -79,15 +124,16 @@ def _loadout(wfam, kit, level, cheap):
     if q1("SELECT json FROM items WHERE id=?", w) and core.item_json(w).get("@twohanded") != "true":
         eq.append({"item": pick("OFF_TORCH")})
     for fam, act, pas in kit[1]:
-        eq.append({"item": pick(fam), "activeSpells": [act], "passiveSpells": [pas]})
-    eq.append({"item": pick("CAPE")})
+        eq.append({"item": pick(fam), "activeSpells": [act] if act else [], "passiveSpells": [pas] if pas else []})
+    eq.append({"item": pick(kit[2] if len(kit) > 2 else "CAPE")})
     eq += [{"item": i, "stack": n} for i, n in CONSUMABLES]
     return {"name": f"{core.q1('SELECT name_en FROM items WHERE id=?', 'T4_' + wfam)['name_en'].replace('Adept' + chr(39) + 's ', '')} · {kit[0]}",
             "equipment": eq}
 
 
 def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100, server="europe", city="Caerleon", pages=20,
-                    shortlist=10, levels=None, budget=None, top=4, profile="balanced", weights=None, distinct=False):
+                    shortlist=10, levels=None, budget=None, top=4, profile="balanced", weights=None, distinct=False, kits="both",
+                    meta_kit_count=3):
     """Rank builds for a PvPvE content by score and by score per silver, in budget bands."""
     W = _weights(profile, weights)
     key = encounter.resolve(content)
@@ -99,8 +145,14 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     if not wfams:
         raise AOError(f"No weapons for classes {cls}")
     levels = [int(x) for x in (levels.split(",") if isinstance(levels, str) else (levels or LEVELS))]
+    if kits not in ("both", "fixed", "meta"):
+        raise AOError("kits must be both, fixed or meta")
+    meta = meta_kits(rules["scale"], server, pages, meta_kit_count) if kits != "fixed" else []
+    if kits == "meta" and not meta:
+        raise AOError("No head · armor · shoes set with 2+ kills at this fight size on the killboard; use kits=both")
+    kitlist = (KITS if kits != "meta" else []) + meta
     # prices: every variant of every item at every level, in one request
-    fams = set(wfams) | {f for _, k in KITS for f, _, _ in k} | {"OFF_TORCH", "CAPE"}
+    fams = set(wfams) | {f for k in kitlist for f, _, _ in k[1]} | {k[2] for k in meta} | {"OFF_TORCH", "CAPE"}
     var = {(f, lv): _variant_at(f, lv) for f in fams for lv in levels}
     prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for i, _ in CONSUMABLES}), server, city, estimate=True)
     is_est = lambda i: prices.get(i, (None, ""))[1].startswith("≈") or market.is_thin(prices.get(i, (None, ""))[1])  # guesses
@@ -158,7 +210,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
 
     # stage 1: every weapon × kit at the middle level; stage 2: the shortlist at every level
     mid = levels[len(levels) // 2]
-    stage1 = [evaluate(w, k, mid) for w in wfams for k in KITS]
+    stage1 = [evaluate(w, k, mid) for w in wfams for k in kitlist]
     fame_max = max(r["pve"]["fame_h"] for r in stage1) or 1
 
     def score(r):
@@ -178,7 +230,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     for r in short:
         for lv in levels:
             if lv != mid:
-                x = evaluate(r["wfam"], next(k for k in KITS if k[0] == r["kit"]), lv)
+                x = evaluate(r["wfam"], next(k for k in kitlist if k[0] == r["kit"]), lv)
                 x["score"] = score(x)
                 results.append(x)
     priced = [r for r in results if r["cost"] and not r["missing"] and (not budget or r["cost"] <= budget)]
@@ -205,18 +257,28 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
                 f"{1 - r['live']:.0%}", f"{r['score']:.2f}", f"{r.get('eff', 0):.2f}", names)
     hdr = ["weapon", "armor kit", "base IP", "cost", "camps lowest HP @90/@50", "elite kills (worst camp)", "fame/h", "PvP win", "PvP die",
            "score", "score / 100k", "Q / W / E"]
-    o = [f"## Build optimizer — {title} T{tier} · {', '.join(cls)} · {len(wfams)} weapons × {len(KITS)} armor kits × "
+    o = [f"## Build optimizer — {title} T{tier} · {', '.join(cls)} · {len(wfams)} weapons × {len(kitlist)} armor kits × "
          f"{len(levels)} IP levels", "",
          f"Each build: camps simulated second by second (encounter_sim, 4 maps), duels vs the {rules['scale']}-fight killboard "
          f"meta ({nev} recent open-world kills, {len(field)} builds at their own IP"
          + (f", capped at {rules['cap']:.0f}" if rules["cap"] else "") + "), priced with the cheapest tier/enchant of every item "
          f"at the level ({city}) + consumables {money(cons_cost)}. Score ({profile}) = {W['pve_safe']:.0%} camp safety + "
          f"{W['pve_speed']:.0%} fame/h + {W['pvp_win']:.0%} PvP win + {W['pvp_live']:.0%} PvP survival."]
+    if meta:
+        o.append("Killboard kits (most worn by " + rules["scale"] + "-fight killers; spells picked for PvP): " + "; ".join(
+            f"{k[0].replace(' (killboard)', '')} + {advisor._fam_name(k[2])} — {k[3]} kills, "
+            + "/".join(core.q1('SELECT name_en FROM spells WHERE id=?', a)["name_en"] if a and core.q1('SELECT name_en FROM spells WHERE id=?', a)
+                       else (a or "—") for _, a, _ in k[1]) for k in meta))
     if warn:
         o.append(f"_Prices incomplete: {'; '.join(warn)}_")
     for lo_b, hi_b in [(0, budget + 1)] if budget else BANDS:
         band = [r for r in priced if lo_b <= r["cost"] < hi_b]
         if not band:
+            if budget:
+                cheapest_ = min((r for r in results if r["cost"] and not r["missing"]), key=lambda r: r["cost"], default=None)
+                o.append(f"\n### Budget ≤ {money(budget)}\nNo build fits the budget" + (
+                    f"; the cheapest is {cheapest_['loadout']['name']} at {cheapest_['level']} IP for {money(cheapest_['cost'])}"
+                    if cheapest_ else "") + ".")
             continue
         best_band = pick(band, lambda r: -r["score"], top)
         rng = (f"≤ {money(budget)}" if budget else f"{money(lo_b)}–{money(hi_b)}") if hi_b < 10 ** 12 else f"{money(lo_b)}+"
@@ -224,7 +286,9 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         o.append("Buy (leader): " + ", ".join(f"`{e['item']}`" + (f" ×{e['stack']}" if e.get("stack", 1) > 1 else "")
                                                for e in best_band[0]["loadout"]["equipment"]))
     eff = pick(priced, lambda r: -r["eff"], 5)
-    o.append("\n### Best value (score per 100k silver, any budget)\n" + table([row(r) for r in eff], hdr))
+    if eff:
+        o.append(f"\n### Best value (score per 100k silver, {'within the budget' if budget else 'any budget'})\n"
+                 + table([row(r) for r in eff], hdr))
     top = max(priced, key=lambda r: r["score"]) if priced else None
     if top:
         o.append("\n**Strongest overall:** " + ", ".join(label(e["item"]) for e in top["loadout"]["equipment"][:6]))

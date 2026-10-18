@@ -177,7 +177,10 @@ TOOLS = [
                                "balanced", enum=["balanced", "farm", "hunter", "survivor"]),
                      weights=P(S, "Override profile weights: 'pvp_win=0.6,pve_safe=0.2' (keys pve_safe, pve_speed, pvp_win, "
                                   "pvp_live; normalised to sum 1)"),
-                     distinct=P(B, "One row per weapon (its best armor kit and IP level)", False))),
+                     distinct=P(B, "One row per weapon (its best armor kit and IP level)", False),
+                     kits=P(S, "Armor kits: both (5 fixed + the killboard's most worn head · armor · shoes sets), fixed, meta",
+                            "both", enum=["both", "fixed", "meta"]),
+                     meta_kit_count=P(I, "How many killboard kits to add", 3))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "
