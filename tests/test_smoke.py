@@ -2,7 +2,7 @@
 import json, os, re, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, gearcheck, market, mcp_server, patchnotes
+from aodb import advisor, core, gearcheck, market, mcp_server, patchnotes, pvp
 from aodb.tools import TOOLS, call
 
 
@@ -253,6 +253,49 @@ class MCP(unittest.TestCase):
     def test_every_tool_schema_is_json(self):
         for t in mcp_server.TOOL_LIST:
             json.dumps(t["inputSchema"])
+
+
+class PvP(unittest.TestCase):
+    EX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "loadouts")
+
+    def test_rules_from_game_data(self):
+        st, sl = pvp.zone_rules("corrupted_stalker"), pvp.zone_rules("corrupted_slayer")
+        self.assertTrue(st["lethal"])
+        self.assertEqual((st["cap"], st["entry_ip"]), (1000, 900))
+        self.assertEqual((sl["cap"], sl["factor"], sl["entry_ip"]), (1300, 0.5, 1100))
+        self.assertFalse(pvp.zone_rules("mists_yellow")["lethal"])
+        self.assertFalse(pvp.zone_rules("arena_1v1")["lethal"])      # arena gear is never dropped
+        self.assertEqual(pvp.resolve_zone("проклятые слеер"), "corrupted_slayer")
+        self.assertAlmostEqual(pvp.effective_ip(1250, st), 1050)       # 1000 + 250 × 0.2
+        self.assertEqual(pvp.effective_ip(900, st), 900)
+        self.assertIn("Hellgate 2v2", pvp.pvp_rules())
+
+    def test_kit_and_duel(self):
+        bow = "@" + os.path.join(self.EX, "bow_badon.json")
+        rules = pvp.zone_rules("corrupted_stalker")
+        p = pvp.build_pvp_player(bow, {"avg_ip": 1250}, rules)
+        self.assertLess(p["eff_avg"], p["avg"])                       # soft cap bites
+        self.assertGreater(p["kit"]["burst"], 0)
+        self.assertGreater(pvp.pvp_spell("CLEANSE_DASH")["cleanse"], 0)
+        frost = {"name": "frost", "equipment": [{"item": "T8_MAIN_FROSTSTAFF"}, {"item": "T8_ARMOR_CLOTH_SET1"}]}
+        self.assertGreater(pvp.build_pvp_player(frost, {"avg_ip": 1200})["kit"]["root30"], 0)
+        strong = pvp.build_pvp_player(bow, {"avg_ip": 1400})
+        weak = pvp.build_pvp_player(bow, {"avg_ip": 900})
+        d = pvp.duel(strong, weak)
+        self.assertGreater(d["win"], d["lose"])                       # more IP wins the mirror match
+        self.assertAlmostEqual(d["win"] + d["lose"] + d["disengage"], 1.0, places=6)
+        t = pvp.pvp_check(bow, "stalker", ips="avg=1250", opponent=bow, price=False)
+        self.assertIn("lost (effective", t)
+        self.assertIn("Matchups", t)
+
+    def test_cap_variants(self):
+        c = pvp.ip_variants(["T6_HEAD_LEATHER_SET2@1"], 1000)["T6_HEAD_LEATHER_SET2@1"]
+        self.assertIn("T4_HEAD_LEATHER_SET2@3", c)
+        self.assertIn("T7_HEAD_LEATHER_SET2", c)
+
+    @unittest.skipUnless(os.environ.get("AO_NET"), "network")
+    def test_killboard_builds(self):
+        self.assertIn("model win rate", pvp.pvp_builds("mists_black", pages=4, top=3))
 
 
 @unittest.skipUnless(os.environ.get("AO_NET"), "set AO_NET=1 to test the live market API")

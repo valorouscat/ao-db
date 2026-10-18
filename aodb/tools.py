@@ -1,5 +1,5 @@
 """Single registry of operations. The CLI and the MCP server are both generated from it."""
-from . import advisor, core, gearcheck, market, patchnotes
+from . import advisor, core, gearcheck, market, patchnotes, pvp
 
 S, I, N, B, A = "string", "integer", "number", "boolean", "array"
 Q_ITEM = "Item ID (T4_MAIN_SWORD@2) or name in any language, optional tier prefix ('6.1 broadsword', 'T8 палаш')"
@@ -132,6 +132,42 @@ TOOLS = [
                      save=P(B, "Write to the journal (false = dry run)", True))),
     dict(name="calibration", fn=gearcheck.calibration,
          desc="Calibration journal: every recorded real outcome vs the current model's raw margin, and the offset applied.", params={}),
+    dict(name="pvp_rules", fn=pvp.pvp_rules,
+         desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
+              "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "
+              "(hunter/stalker/slayer), hellgates, arenas, open-world zones, Roads.",
+         params=dict(content=P(S, "Content key or words: mists_black, mists_yellow, mists_duo, corrupted_stalker, slayer, hellgate_2v2, "
+                                  "roads, black… (empty = all)"))),
+    dict(name="pvp_check", fn=pvp.pvp_check,
+         desc="PvP readiness of a loadout in a PvP/PvPvE content: effective IP after the soft cap (and wasted IP), kit vs players "
+              "(burst, DPS, crowd control, escapes, shields/heals, cleanse/purge/anti-heal, gaps), duel matchups against the killboard "
+              "meta builds at that fight size (or a given opponent loadout), re-gear cost.",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export) or @file", required=True),
+                     content=P(S, "PvP content (see pvp_rules)", "mists_black"),
+                     ips=P(S, "In-game IP incl. mastery and max HP: 'avg=1225,mainhand=1300,hp=2500'"),
+                     intents=P(S, "Spell choice in words when the loadout lacks spells ('Q W на урон'); default: picked for PvP"),
+                     opponent=P(S, "Opponent loadout JSON or @file instead of the killboard meta"),
+                     server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     pages=P(I, "Killboard pages of 51 kills (max 20)", 10), price=P(B, "Look up re-gear cost", True))),
+    dict(name="pvp_builds", fn=pvp.pvp_builds,
+         desc="Build search for PvP/PvPvE content: killboard builds at the content's fight size (solo / 2-3 / 4+), each simulated "
+              "against the rest of the field at the content's effective IP (soft cap), ranked by model win rate + killboard K/D, "
+              "with the cheapest tier/enchant set that reaches the cap. Use to pick builds for mists, corrupted dungeons, hellgates.",
+         params=dict(content=P(S, "PvP content (see pvp_rules)", "mists_black"), server=P(S, "Server", "europe", enum=list(market.SERVERS)),
+                     pages=P(I, "Killboard pages of 51 kills (max 20)", 10), budget=P(N, "Max re-gear cost in silver"),
+                     weapon=P(S, "Only builds with this weapon (ID or name)"), city=P(S, "Price city", "Caerleon"),
+                     top=P(I, "Builds to show", 8), spec_ip=P(I, "IP your mastery adds on top of base item IP (for the cap set)", 100))),
+    dict(name="farm_plan", fn=pvp.farm_plan,
+         desc="Where to farm with a build: per PvP/PvPvE content — entry check, effective IP, win/death chance vs that fight size's "
+              "killboard meta, reward multipliers, expected re-gear loss per hour and the silver/hour needed to break even "
+              "(or net profit when silver_per_hour is given).",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export) or @file", required=True),
+                     contents=P(A, "Contents to compare (default: mists, corrupted hunter/stalker/slayer, roads, black zone)"),
+                     ips=P(S, "In-game IP incl. mastery: 'avg=1225,mainhand=1300,hp=2500'"),
+                     silver_per_hour=P(S, "Your measured silver/hour per content: 'mists_black=2500000,corrupted_stalker=1800000' or one number"),
+                     encounters_per_hour=P(S, "Hostile fights per hour (overrides the assumptions): 'mists_black=2,corrupted_stalker=1'"),
+                     server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     pages=P(I, "Killboard pages of 51 kills (max 20)", 10))),
     dict(name="chest_value", fn=advisor.chest_value,
          desc="Expected loot value of chests (Avalon roads, corrupted dungeons, hellgates, mists, static dungeons, treasure...) computed "
               "through the loot tables; ranks chests so you can tell which are worth opening.",

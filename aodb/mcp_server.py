@@ -33,7 +33,7 @@ def schema_for(t):
     return {"type": "object", "properties": props, "required": req, "additionalProperties": False}
 
 
-OPEN_WORLD = {"price", "history", "best_city", "craft_profit", "build_cost", "meta_builds", "update_patchnotes", "gear_check", "group_check"}
+OPEN_WORLD = {"price", "history", "best_city", "craft_profit", "build_cost", "meta_builds", "update_patchnotes", "gear_check", "group_check", "pvp_check", "pvp_builds", "farm_plan"}
 TOOL_LIST = [{"name": t["name"], "description": t["desc"], "inputSchema": schema_for(t),
               "annotations": {"readOnlyHint": t["name"] not in ("html", "save_note", "update_patchnotes", "record_outcome"),
                               "openWorldHint": t["name"] in OPEN_WORLD}}

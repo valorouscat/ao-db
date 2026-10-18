@@ -38,6 +38,13 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      the difference equally). Present the verdict as a model estimate.
    - Small groups (2-3 loadouts): `group_check` → roles, combined power, verdict per camp tier/stage, composition gaps,
      loot per player, total re-gear risk. Ask for each player's in-game IP (`ips`, players separated by '|').
+   - PvP / PvPvE (mists, corrupted dungeons, hellgates, arenas, Roads, black zone): `pvp_rules` (lethality, IP soft cap +
+     factor, entry IP, team, reward multipliers — from worldsettings.json), `pvp_builds` (killboard builds at the content's fight
+     size simulated against each other at the cap IP, cheapest tier/enchant set reaching the cap), `pvp_check` (a player's
+     loadout: effective IP and wasted IP above the cap, kit vs players, gaps such as no cleanse/escape, matchups),
+     `farm_plan` (where to farm: win/death chance vs the meta, expected re-gear loss/h, break-even silver/h). The public
+     killboard covers open-world kills only — say it is a proxy for instanced content. Fights/hour are assumptions: ask the
+     user for their real numbers and pass `encounters_per_hour` / `silver_per_hour`.
    - **Real outcomes calibrate the model.** When the user reports how a run actually went (cleared easily / barely / died, lowest HP,
      consumables), call `record_outcome` (outcome: easy / doable / hard / failed; same loadout + IP as the check) and commit
      `knowledge/calibration.json`. gear_check/group_check then show calibrated margins with the raw value in brackets;
