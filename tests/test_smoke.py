@@ -2,7 +2,7 @@
 import json, os, re, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, encounter, gearcheck, market, mcp_server, patchnotes, pvp
+from aodb import advisor, core, encounter, gearcheck, market, mcp_server, optimizer, patchnotes, pvp
 from aodb.tools import TOOLS, call
 
 
@@ -321,6 +321,18 @@ class Encounters(unittest.TestCase):
         self.assertNotIn("MOB_UNDEAD_ARCHER_BOSS_CHAIN_LIGHTNING", archer["abilities"])   # boss spell not on a normal mob
         self.assertTrue(combat.telegraphed("MOB_UNDEAD_ARCHER_SKILLSHOT"))                # warning area on the ground
         self.assertGreater(combat.mob_profile("T6_MOB_CD_DEMON_SORCERER", True)["dodgeable"], 0)  # caster without autos
+
+    def test_optimizer_pieces(self):
+        fams = optimizer.weapon_families(["bow", "crossbow"])
+        self.assertIn("2H_WARBOW", fams)
+        self.assertIn("MAIN_1HCROSSBOW", fams)
+        self.assertIn("T4_2H_WARBOW@3", optimizer._variant_at("2H_WARBOW", 1000))
+        lo = optimizer._loadout("MAIN_1HCROSSBOW", optimizer.KITS[0], 900, {})
+        self.assertTrue(any("OFF_TORCH" in e["item"] for e in lo["equipment"]))  # one-handed weapon gets an off-hand
+        from aodb import combat, market
+        self.assertEqual(combat.spell_profile("SKILLSHOT_STUN", "players")["dmg"], 232)  # near/far alternatives, player version only
+        self.assertTrue(market._absurd("T8_POTION_CLEANSE", 13_000_000))           # troll listing
+        self.assertFalse(market._absurd("T8_POTION_CLEANSE", 15_000))
 
     def test_fight_and_sim(self):
         p = gearcheck.build_player(self.BOW, {"avg_ip": 1250})

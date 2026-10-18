@@ -1,5 +1,5 @@
 """Single registry of operations. The CLI and the MCP server are both generated from it."""
-from . import advisor, core, encounter, gearcheck, market, patchnotes, pvp
+from . import advisor, core, encounter, gearcheck, market, optimizer, patchnotes, pvp
 
 S, I, N, B, A = "string", "integer", "number", "boolean", "array"
 Q_ITEM = "Item ID (T4_MAIN_SWORD@2) or name in any language, optional tier prefix ('6.1 broadsword', 'T8 палаш')"
@@ -153,6 +153,18 @@ TOOLS = [
                      content=P(S, "green / blue / gold", "green"), tier=P(I, "Tier", 6), stage=P(S, "small / medium / large", "large"),
                      ips=P(S, "In-game IP incl. mastery and max HP"), intents=P(S, "Spell choice in words"),
                      dodge=P(N, "Dodge share", 0.9), dodge_low=P(N, "Pessimistic dodge", 0.5))),
+    dict(name="build_optimizer", fn=optimizer.build_optimizer,
+         desc="Find the most effective builds per silver for a PvPvE content (Mists, corrupted dungeons, hellgate PvE): every weapon "
+              "of the chosen classes × armor kits × item-power levels, each simulated on the content's camps/rooms and dueled "
+              "against the killboard meta of that fight size, priced with the cheapest tier/enchant at each IP level; ranked by score "
+              "inside budget bands and by score per 100k silver.",
+         params=dict(content=P(S, "mists / mists_yellow / mists_dungeon / corrupted_hunter / corrupted_stalker / corrupted_slayer", "mists"),
+                     tier=P(I, "Content tier", 6), classes=P(S, "Weapon classes (items.sub1), comma separated: bow, crossbow, sword, "
+                                                                   "firestaff, cursestaff, dagger…", "bow,crossbow"),
+                     spec_ip=P(I, "IP the player's mastery adds on top of base item power", 100),
+                     levels=P(S, "Base IP levels to try, comma separated", "800,900,1000,1100,1200"),
+                     server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "

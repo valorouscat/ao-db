@@ -201,12 +201,24 @@ def best_city(item, server="europe", quality=1):
 WARNINGS = []  # non-fatal API problems from the last price_map call, shown by callers
 
 
+ABSURD_VALUE_RATIO = 300  # market prices run ~5-40× the game's item value; a lone listing far above is a troll listing
+
+
+def _absurd(item_id, price):
+    try:
+        v = item_value(item_id)
+    except Exception:
+        return False
+    return bool(v) and price > ABSURD_VALUE_RATIO * v
+
+
 def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_history=True):
     """{item_id: (unit_price, source)} — live sell_price_min, falling back to (or capped by) the recent average.
     API failures (e.g. rate limits) degrade to 'no data' and are reported in WARNINGS instead of raising."""
     ids = list(dict.fromkeys(ids))
     WARNINGS.clear()
     live, hist = {}, {}
+    live_ok = True
     for i in range(0, len(ids), 80):
         try:
             for d in _get("prices", ids[i:i + 80], server, locations=city, qualities=quality):
@@ -214,16 +226,18 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
                     live[d["item_id"]] = (d["sell_price_min"], d["sell_price_min_date"])
         except AOError as e:
             WARNINGS.append(str(e))
+            live_ok = False
             break
-    for i in range(0, len(ids), 80) if use_history and not WARNINGS else ():
+    for i in range(0, len(ids), 80) if use_history and live_ok else ():
         try:
             hist.update({k[0]: v for k, v in history_avg(ids[i:i + 80], server, city, quality, days).items()})
         except AOError as e:
             WARNINGS.append(f"history: {e}")
             break
-    # cross-city median of fresh listings: fills gaps and catches single overpriced listings
+    # cross-city median of fresh listings: fills gaps and catches single overpriced listings — still needed (most of all)
+    # when the history request failed, otherwise a troll listing goes through unchecked
     xcity = defaultdict(list)
-    for i in range(0, len(ids), 80) if not WARNINGS else ():
+    for i in range(0, len(ids), 80) if live_ok else ():
         try:
             for d in _get("prices", ids[i:i + 80], server, qualities=quality):
                 age = _hours(d["sell_price_min_date"])
@@ -240,6 +254,8 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
         ref = hv[0] if hv and hv[0] else med
         if lv and ref and lv[0] > ref * 1.25:
             out[i] = (ref, f"{'%dd avg' % days if hv and hv[0] else 'median of %d cities' % len(xs)} (live {money(lv[0])} inflated)")
+        elif lv and not ref and _absurd(i, lv[0]):  # nothing to compare with and far above any normal market/value ratio
+            out[i] = (None, f"live {money(lv[0])} ignored (×{lv[0] / item_value(i):,.0f} item value, no reference price)")
         elif lv:
             out[i] = (lv[0], f"live {_ago(lv[1])}")
         elif hv and hv[0]:

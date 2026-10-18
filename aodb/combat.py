@@ -67,15 +67,23 @@ class SpellWalk:
         for key, val in node.items():
             if key.startswith("@") or key in SKIP_KEYS or key.startswith("If"):
                 continue
-            for ch in _aslist(val):
-                if not isinstance(ch, dict):
-                    continue
-                if key == "directattributechange":
-                    if ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) < 0 and _targets_ok(ch, self.vs):
+            if key == "directattributechange":
+                # conditional siblings (near/far, buffed/unbuffed: IfSpellActive / not ...) are alternatives — count the largest
+                plain, alt = 0.0, 0.0
+                for ch in _aslist(val):
+                    if isinstance(ch, dict) and ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) < 0 \
+                            and _targets_ok(ch, self.vs):
                         v = -num(ch["@change"]) * mult
-                        total += v
+                        if any(k_.startswith("If") or k_ == "not" for k_ in ch):
+                            alt = max(alt, v)
+                        else:
+                            plain += v
                         et = ch.get("@effecttype") or "physical"
                         self.types[et] = self.types.get(et, 0) + v
+                total += plain + alt
+                continue
+            for ch in _aslist(val):
+                if not isinstance(ch, dict):
                     continue
                 if key == "attributechangeovertime":  # DoT/HoT: change per tick × ticks
                     if ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) < 0 and _targets_ok(ch, self.vs):
@@ -113,6 +121,9 @@ class SpellWalk:
                     m *= min(num(ch.get("@maxtargets")) or num(ch.get("@count")) or 1, MAX_TARGETS)
                 elif key in ("circle", "cone", "rectangle"):
                     self.aoe = True
+                tgt = (ch.get("@target") or "").lower()
+                if (self.vs == "players" and "mob" in tgt) or (self.vs == "mobs" and "player" in tgt):
+                    continue  # the other side's version of the effect (e.g. ..._DAMAGE_MOB vs ..._DAMAGE_PLAYER)
                 for attr in ("@spell", "@effect"):
                     ref = ch.get(attr)
                     if ref and ref != "none" and spell_json(ref):
@@ -201,12 +212,22 @@ def spell_dps(sid, n_targets=1, vs="mobs"):
 
 
 # ------------------------------------------------------------------ weapon kits
+@functools.lru_cache(maxsize=None)
+def _e_spread(sid):
+    """How many weapons offer this spell as their E (slot 3)."""
+    return q1("SELECT COUNT(DISTINCT item_id) n FROM item_spells WHERE spell_id=? AND slots='3'", sid)["n"]
+
+
 def weapon_spells(base_item):
-    """{slot: [(spell_id, name, category)]} — slot 1/2/3 = Q/W/E, 'passive'."""
+    """{slot: [(spell_id, name, category)]} — slot 1/2/3 = Q/W/E, 'passive'. A weapon has exactly one E: artifact weapons
+    inherit the base weapon's E through the @reference chain, so keep only the most specific (rarest) E spell."""
     out = {}
     for r in q("SELECT s.spell_id, s.slots, sp.name_en, sp.name_ru, sp.category FROM item_spells s LEFT JOIN spells sp ON sp.id=s.spell_id "
                "WHERE s.item_id=?", base_item):
         out.setdefault(r["slots"] or "passive", []).append((r["spell_id"], r["name_en"], r["name_ru"], r["category"]))
+    if len(out.get("3", [])) > 1:
+        rarest = min(_e_spread(o[0]) for o in out["3"])
+        out["3"] = [o for o in out["3"] if _e_spread(o[0]) == rarest]
     return out
 
 
