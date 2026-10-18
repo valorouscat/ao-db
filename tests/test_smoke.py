@@ -163,6 +163,26 @@ class GearCheck(unittest.TestCase):
         with self.assertRaises(gearcheck.AOError):
             gearcheck.record_outcome(json.dumps(LOADOUT), "green", 6, "large", "meh", save=False)
 
+    def test_mists_calibration_group(self):
+        import pathlib, shutil
+        d = pathlib.Path(tempfile.mkdtemp()) / "calibration.json"
+        shutil.copy(gearcheck.CALIBRATION_FILE, d)
+        with mock.patch.object(gearcheck, "CALIBRATION_FILE", d):
+            encounter._cal.clear()
+            self.assertEqual(encounter.sim_calibration("mists")["borrowed"], ["roads"])
+            roads_k = encounter.sim_calibration("green")["k"]
+            t = gearcheck.record_outcome(json.dumps(LOADOUT), "мгла", outcome="doable", min_hp=0.35, clear_minutes=7, save=False)
+            self.assertIn("lowest HP: you 35%", t)
+            self.assertEqual(encounter.sim_calibration("mists")["borrowed"], ["roads"])      # dry run: journal untouched
+            with self.assertRaises(core.AOError):
+                gearcheck.record_outcome(json.dumps(LOADOUT), "mists", outcome="easy")        # min_hp is required
+            gearcheck.record_outcome(json.dumps(LOADOUT), "mists", outcome="doable", min_hp=0.35, clear_minutes=7)
+            mists = encounter.sim_calibration("mists")
+            self.assertEqual((mists["n"], mists["tn"], mists["borrowed"]), (1, 1, []))
+            self.assertEqual(encounter.sim_calibration("green")["k"], roads_k)              # other groups keep their factor
+            self.assertIn("mists", gearcheck.calibration())
+        encounter._cal.clear()
+
     def test_intents(self):
         self.assertEqual(gearcheck.parse_intents("Q W на урон"), {"1": "damage", "2": "damage"})
         _, e = gearcheck.parse_loadout(json.dumps({"equipment": [{"item": "T4_MAIN_NATURESTAFF_KEEPER@1"}]}))

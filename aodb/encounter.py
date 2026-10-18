@@ -28,7 +28,7 @@ CONTENT = {  # key -> (title, encounters.content, default tier, zone rules key f
 ALIASES = [("slayer", "corrupted_slayer"), ("слеер", "corrupted_slayer"), ("stalker", "corrupted_stalker"), ("сталкер", "corrupted_stalker"),
            ("hunter", "corrupted_hunter"), ("хантер", "corrupted_hunter"), ("corrupt", "corrupted_stalker"), ("проклят", "corrupted_stalker"),
            ("mist dungeon", "mists_dungeon"), ("mists_dungeon", "mists_dungeon"), ("желт", "mists_yellow"), ("жёлт", "mists_yellow"),
-           ("yellow", "mists_yellow"), ("mist", "mists"), ("мист", "mists"), ("туман", "mists"), ("hellgate", "hellgate"), ("адск", "hellgate")]
+           ("yellow", "mists_yellow"), ("mist", "mists"), ("мист", "mists"), ("мгл", "mists"), ("туман", "mists"), ("hellgate", "hellgate"), ("адск", "hellgate")]
 
 
 def resolve(content):
@@ -262,39 +262,91 @@ def _camp_key(content):
 _cal = {}
 
 
-def sim_calibration():
-    """Damage factor k (player damage × k) fitted so the simulated lowest HP matches recorded real fights (min_hp), and a time
-    scale from recorded clear_minutes. Recomputed when knowledge/calibration.json changes."""
+def cal_family(content):
+    """Calibration group of a content: 'roads' for Roads camps, else the encounter kind (mists, mists_dungeon, corrupted,
+    hellgate) — damage taken and dealt differ by content, so each group gets its own factor."""
+    s_ = (content or "").lower().strip()
+    if s_ in CONTENT:
+        return CONTENT[s_][1]
+    if s_ in gearcheck.CONTENT:
+        return "roads"
     try:
-        stamp = gearcheck.CALIBRATION_FILE.stat().st_mtime_ns
-    except FileNotFoundError:
-        stamp = None
-    if _cal.get("stamp") == stamp:
-        return _cal["v"]
-    ks, ts = [], []
-    for o in gearcheck._cal_load():
-        key = _camp_key(o.get("content"))
-        if not key or o.get("min_hp") is None or len(o.get("loadouts") or []) != 1:
-            continue
-        try:
-            p = gearcheck.build_player(o["loadouts"][0], gearcheck._parse_ips(o.get("ips"), 1)[0], (o.get("intents") or [None])[0])
-        except AOError:
-            continue
-        low_at = lambda k: statistics.median(r[1] for r in _camp_eval(Fighter(p, k), key, int(o["tier"]), o["stage"], gearcheck.DODGE))
+        return CONTENT[resolve(s_)][1]  # aliases: Mists / corrupted words win over the Roads words ('solo mists')
+    except AOError:
+        return "roads" if _camp_key(s_) else None
+
+
+def _obs_player(o):
+    return gearcheck.build_player(o["loadouts"][0], gearcheck._parse_ips(o.get("ips"), 1)[0], (o.get("intents") or [None])[0])
+
+
+def _obs_eval(o, p, k):
+    """[(seconds, lowest HP)] the model gives an observation's content at damage factor k: Roads camp variants, or the
+    encounter maps (only the named one when the stage field holds a map name)."""
+    key = _camp_key(o.get("content")) if cal_family(o.get("content")) == "roads" else None
+    if key:
+        return [(t, low) for t, low, _, _ in _camp_eval(Fighter(p, k), key, int(o["tier"]), o["stage"], gearcheck.DODGE)]
+    ekey = resolve(o["content"])
+    _, kind, dtier, zone, continent = CONTENT[ekey]
+    mp = _maps(kind, int(o.get("tier") or dtier), continent, 12)
+    named = [m for m in mp if o.get("stage") and m[0].lower() == str(o["stage"]).lower()]
+    rules = pvp.zone_rules(zone)
+    if rules["cap"] and p["weapon"] > rules["cap"]:
+        p = dict(p, weapon=pvp.effective_ip(p["weapon"], rules), armor=pvp.effective_ip(p["armor"], rules))
+    return [(r["time"], r["low"]) for r in simulate(Fighter(p, k), named or mp[:4], gearcheck.DODGE)]
+
+
+def observation_low(o):
+    """Lowest HP the model gives an encounter-content observation at the current calibration of its group."""
+    return statistics.median(low for _, low in _obs_eval(o, _obs_player(o), sim_calibration(o["content"])["k"]))
+
+
+def fit_observation(o):
+    """(k, model time at k in minutes) fitted so the simulated lowest HP matches the observation's min_hp; None if unusable."""
+    if o.get("min_hp") is None or len(o.get("loadouts") or []) != 1 or not cal_family(o.get("content")):
+        return None
+    try:
+        p = _obs_player(o)
+        low_at = lambda k: statistics.median(low for _, low in _obs_eval(o, p, k))
         lo_k, hi_k = 0.5, 12.0
         if low_at(hi_k) < o["min_hp"]:
-            continue
+            return None
         for _ in range(14):  # bisection: lowest HP grows with damage
             mid = (lo_k + hi_k) / 2
             lo_k, hi_k = (mid, hi_k) if low_at(mid) < o["min_hp"] else (lo_k, mid)
         k = (lo_k + hi_k) / 2
-        ks.extend([k] * max(int(o.get("runs") or 1), 1))
-        if o.get("clear_minutes"):
-            model = statistics.median(r[0] for r in _camp_eval(Fighter(p, k), key, int(o["tier"]), o["stage"], gearcheck.DODGE)) / 60
-            ts.append(o["clear_minutes"] / model)
-    v = {"k": statistics.median(ks) if ks else DEFAULT_K, "n": len(ks), "ts": statistics.median(ts) if ts else 1.0, "tn": len(ts)}
-    _cal.update(stamp=stamp, v=v)
-    return v
+        return k, statistics.median(t for t, _ in _obs_eval(o, p, k)) / 60
+    except (AOError, KeyError, ValueError, statistics.StatisticsError):
+        return None
+
+
+def sim_calibration(content=None):
+    """Damage factor k (player damage × k) fitted so the simulated lowest HP matches recorded real fights (min_hp), and a time
+    scale from recorded clear_minutes — per content group (cal_family). A group without records borrows the median of all
+    records ('borrowed' lists where from). Recomputed when knowledge/calibration.json changes."""
+    try:
+        stamp = gearcheck.CALIBRATION_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        stamp = None
+    if _cal.get("stamp") != stamp:
+        groups = {}
+        for o in gearcheck._cal_load():
+            fit = fit_observation(o)
+            if not fit:
+                continue
+            g = groups.setdefault(cal_family(o["content"]), {"ks": [], "ts": []})
+            g["ks"].extend([fit[0]] * max(int(o.get("runs") or 1), 1))
+            if o.get("clear_minutes") and fit[1]:
+                g["ts"].append(o["clear_minutes"] / fit[1])
+        _cal.clear()
+        _cal.update(stamp=stamp, groups=groups)
+    groups, fam = _cal["groups"], cal_family(content) if content else None
+    own = groups.get(fam) if fam else None
+    pick = [own] if own else list(groups.values())
+    ks = [k for g in pick for k in g["ks"]]
+    ts = [t for g in pick for t in g["ts"]]
+    return {"k": statistics.median(ks) if ks else DEFAULT_K, "n": len(ks), "ts": statistics.median(ts) if ts else 1.0, "tn": len(ts),
+            "family": fam, "borrowed": sorted(g for g in groups if g != fam) if fam and not own and groups else []}
 
 
 DEFAULT_K = 3.0  # used only when the journal has no usable real outcome
@@ -344,7 +396,7 @@ def encounter_sim(loadout, content="corrupted_stalker", tier=None, ips=None, int
     if rules["cap"] and p["weapon"] > rules["cap"]:  # the zone's soft cap applies to monsters' fights too
         p = dict(p, weapon=pvp.effective_ip(p["weapon"], rules), armor=pvp.effective_ip(p["armor"], rules))
         capped = True
-    cal = sim_calibration()
+    cal = sim_calibration(key)
     f = Fighter(p, cal["k"])
     mp = _maps(kind, tier, continent, maps)
     if not mp:
@@ -402,7 +454,7 @@ def camp_sim(loadout, content="green", tier=6, stage="large", ips=None, intents=
         raise AOError(f"Unknown camp content {content!r} (green / blue / gold)")
     ip_spec = gearcheck._parse_ips(ips, 1)[0] if ips else {}
     p = gearcheck.build_player(loadout, ip_spec, intents)
-    cal = sim_calibration()
+    cal = sim_calibration(key)
     f = Fighter(p, cal["k"])
     hi, lo = _camp_eval(f, key, int(tier), stage, dodge), _camp_eval(f, key, int(tier), stage, dodge_low)
     if not hi:
@@ -420,9 +472,17 @@ def camp_sim(loadout, content="green", tier=6, stage="large", ips=None, intents=
 
 
 def _cal_line(cal):
-    return (f"_Calibration: player damage × {cal['k']:.2f} " + (f"fitted on {cal['n']} real run(s) (lowest HP)" if cal["n"] else
+    return (f"_Calibration: player damage × {cal['k']:.2f} " + (f"fitted on {cal['n']} real run(s)" + (f" of {', '.join(cal['borrowed'])}" if cal.get("borrowed") else "")
+                                                   + " (lowest HP)" if cal["n"] else
             "(default — no real outcome with min_hp in the journal)") + f"; times × {cal['ts']:.2f}" +
-            (f" from {cal['tn']} recorded clear time(s)" if cal["tn"] else " (no recorded clear times: add clear_minutes to record_outcome)") + "._")
+            (f" from {cal['tn']} recorded clear time(s)" if cal["tn"] else " (no recorded clear times: add clear_minutes to record_outcome)") + "._"
+            + (f"\n⚠ {cal_warning(cal)}" if cal.get("borrowed") else ""))
+
+
+def cal_warning(cal):
+    return (f"No real {cal['family']} runs in the calibration journal — the damage factor is borrowed from "
+            f"{', '.join(cal['borrowed'])} and may not transfer. Record a run: record_outcome content={cal['family']} "
+            "min_hp=… clear_minutes=… (stage = the camp/map name if you know it).")
 
 
 def pve_summary(loadout, content, ips=None, intents=None, maps=4, ip_spec=None):
@@ -437,7 +497,7 @@ def pve_summary(loadout, content, ips=None, intents=None, maps=4, ip_spec=None):
     p = gearcheck.build_player(loadout, ip_spec or (gearcheck._parse_ips(ips, 1)[0] if ips else {}), intents)
     if rules["cap"] and p["weapon"] > rules["cap"]:
         p = dict(p, weapon=pvp.effective_ip(p["weapon"], rules), armor=pvp.effective_ip(p["armor"], rules))
-    cal = sim_calibration()
+    cal = sim_calibration(key)
     f = Fighter(p, cal["k"])
     mp = _maps(kind, tier, continent, maps)
     if not mp:

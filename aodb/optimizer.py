@@ -238,5 +238,8 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     o.append(f"\n_IP = base item power of the gear + {spec_ip} assumed from mastery (pass spec_ip). Camp numbers are calibrated on "
              "the real-outcome journal; PvP is the duel model vs open-world killboard builds — skill, positioning and cooldown "
              "timing are not modelled. Spells: picked for PvP per slot (damage, CC, escapes)._")
+    cal = encounter.sim_calibration(key)
+    if cal["borrowed"]:
+        o.append(f"⚠ {encounter.cal_warning(cal)}")
     o.append(advisor.kb_line())
     return "\n".join(o)

@@ -57,6 +57,8 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      `knowledge/calibration.json`. gear_check/group_check then show calibrated margins with the raw value in brackets;
      `calibration` lists the journal. Repeat clears of the same setup/content → `runs=N` (one entry, weighted), not duplicates.
      With fewer than 3 distinct entries say the offset may not transfer to other tiers/chests/builds.
+     Mists / corrupted / hellgate runs: `record_outcome content=mists min_hp=… clear_minutes=…` (stage = camp/map name from
+     encounter_sim if known) — each content group has its own damage factor; outputs flag a factor borrowed from other content.
 3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
    (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
    comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.

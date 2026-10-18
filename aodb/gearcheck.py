@@ -876,7 +876,10 @@ def calibration_offset():
         _cal_cache["stamp"] = stamp
     if "v" not in _cal_cache:
         res = []  # (error, runs) — an entry with runs=N is the same setup/content cleared N times
+        from . import encounter
         for obs in _cal_load():
+            if encounter.cal_family(obs.get("content")) not in (None, "roads"):  # encounter content calibrates sim damage only
+                continue
             try:
                 res.append((OUTCOME_MARGIN[_norm_outcome(obs["outcome"])] - observation_margin(obs), max(int(obs.get("runs") or 1), 1)))
             except (AOError, KeyError, StopIteration):
@@ -891,11 +894,22 @@ def calibration_offset():
     return _cal_cache["v"]
 
 
-def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=None, min_hp=None, consumables_used=None, notes=None,
+def record_outcome(loadouts, content, tier=None, stage=None, outcome=None, ips=None, intents=None, min_hp=None, consumables_used=None, notes=None,
                    runs=1, mastery=None, clear_minutes=None, date=None, save=True):
     """Add a real fight outcome to the calibration journal; returns the model's raw margin for it and the new offset."""
     if isinstance(loadouts, (str, dict)):
         loadouts = [loadouts]
+    from . import encounter
+    if not outcome:
+        raise AOError(f"Give the outcome: {', '.join(OUTCOME_MARGIN)}")
+    sim = encounter.cal_family(content) not in (None, "roads")  # Mists / corrupted / hellgate: fitted by encounter_sim
+    if sim:
+        content = encounter.resolve(content)
+        tier = tier or encounter.CONTENT[content][2]
+        if min_hp is None:
+            raise AOError("Give min_hp (lowest HP share during the run, 0-1): it is what calibrates the Mists / dungeon model")
+    elif not tier or not stage:
+        raise AOError("Roads camps need tier and stage (small / medium / large)")
     los = []
     for lo in loadouts:
         if isinstance(lo, str):
@@ -913,6 +927,8 @@ def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=No
         obs["patch"] = f"{d_} {t_}" if d_ else None
     except Exception:
         pass
+    if sim:
+        return _record_sim(obs, save)
     raw = observation_margin(obs)
     if save:
         data = _cal_load() + [obs]
@@ -927,6 +943,29 @@ def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=No
     return "\n".join(out)
 
 
+def _record_sim(obs, save):
+    """record_outcome for encounter content: compare the model's lowest HP with the reported one, refit that group's factor."""
+    from . import encounter
+    before = encounter.sim_calibration(obs["content"])
+    model = encounter.observation_low(obs)
+    if save:
+        data = _cal_load() + [obs]
+        CALIBRATION_FILE.write_text(json.dumps({"observations": data}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        _cal_cache.clear()
+    after = encounter.sim_calibration(obs["content"])
+    where = f"{obs['content']} T{obs['tier']}" + (f" {obs['stage']}" if obs.get("stage") else "")
+    out = [f"## Outcome {'recorded' if save else '(dry run)'}: {where} → **{obs['outcome']}**",
+           f"- lowest HP: you {obs['min_hp']:.0%} · model {model:.0%} (damage × {before['k']:.2f}"
+           + (f", borrowed from {', '.join(before['borrowed'])}" if before["borrowed"] else "") + ")"]
+    if save:
+        if encounter.fit_observation(obs) is None:
+            out.append("- ⚠ not usable for calibration (the model can't reach that HP with this loadout, or several loadouts)")
+        out.append(f"- {after['family']} calibration now: damage × {after['k']:.2f} over {after['n']} run(s)"
+                   + (f", times × {after['ts']:.2f} from {after['tn']} clear time(s)" if after["tn"] else
+                      " — add clear_minutes to calibrate times"))
+    return "\n".join(out)
+
+
 def calibration():
     """The calibration journal: each real outcome vs the current model."""
     obs = _cal_load()
@@ -935,16 +974,32 @@ def calibration():
     rows = []
     for i, ob in enumerate(obs):
         try:
-            raw = observation_margin(ob)
-            tgt = OUTCOME_MARGIN[_norm_outcome(ob["outcome"])]
-            r = (f"{raw:+.0f}", f"{tgt:+d}", f"{tgt - raw:+.0f}")
+            from . import encounter
+            if encounter.cal_family(ob["content"]) not in (None, "roads"):  # encounter content: lowest HP, model vs real
+                low = encounter.observation_low(ob)
+                r = (f"HP {low:.0%}", f"HP {ob['min_hp']:.0%}", f"{(ob['min_hp'] - low) * 100:+.0f} pp")
+            else:
+                raw = observation_margin(ob)
+                tgt = OUTCOME_MARGIN[_norm_outcome(ob["outcome"])]
+                r = (f"{raw:+.0f}", f"{tgt:+d}", f"{tgt - raw:+.0f}")
         except (AOError, KeyError, StopIteration) as e:
             r = ("—", "—", f"error: {e}")
         names = ", ".join(lo.get("name", "?") for lo in ob["loadouts"])
-        rows.append((i + 1, ob.get("date", ""), ob.get("patch") or "", names, ob.get("ips") or "", f"{ob['content']} T{ob['tier']} {ob['stage']}",
+        rows.append((i + 1, ob.get("date", ""), ob.get("patch") or "", names, ob.get("ips") or "", f"{ob['content']} T{ob['tier']} {ob.get('stage') or ''}".strip(),
                      ob["outcome"], ob.get("runs") or 1, f"{ob['min_hp']:.0%}" if isinstance(ob.get("min_hp"), (int, float)) else "", *r, ob.get("notes") or ""))
     cal = calibration_offset()
     return ("## Calibration journal\n" + table(rows, ["#", "date", "patch", "loadouts", "IP", "content", "outcome", "runs", "min HP", "model raw",
                                                       "target", "error", "notes"]) +
             (f"\n\nOffset applied to gear_check/group_check margins: **{cal['offset']:+.0f} IP** (mean error, cap ±{CAL_CAP}; "
-             f"{cal['runs']} runs in {cal['n']} entries, spread ±{cal['spread']:.0f})." if cal else ""))
+             f"{cal['runs']} runs in {cal['n']} entries, spread ±{cal['spread']:.0f})." if cal else "") + _sim_cal_lines())
+
+
+def _sim_cal_lines():
+    from . import encounter
+    rows = []
+    for fam in ("roads", "mists", "mists_dungeon", "corrupted", "hellgate"):
+        c = encounter.sim_calibration({"roads": "avalon_solo", "corrupted": "corrupted_stalker"}.get(fam, fam))
+        rows.append((fam, f"× {c['k']:.2f}", c["n"] if not c["borrowed"] else f"0 — borrowed from {', '.join(c['borrowed'])}",
+                     f"× {c['ts']:.2f} ({c['tn']})" if c["tn"] else "—"))
+    return "\n\n### Simulation damage factor per content (encounter_sim, camp_sim, build_optimizer)\n" + table(
+        rows, ["content", "damage factor", "real runs", "time factor (clear times)"])
