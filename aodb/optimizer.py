@@ -164,7 +164,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         return (r["loadout"]["name"].split(" · ")[0], r["kit"], f"{r['level']} (+{spec_ip})", ("~" if r.get("estimated") else "") + money(r["cost"]),
                 f"{p['low']:.0%} / {p['low_pess']:.0%}", f"{p['elite']:.0%}", f"{p['fame_h'] / 1e6:.2f}M", f"{r['win']:.0%}",
                 f"{1 - r['live']:.0%}", f"{r['score']:.2f}", f"{r.get('eff', 0):.2f}", names)
-    hdr = ["weapon", "armor kit", "base IP", "cost", "camps lowest HP @90/@50", "elite kills", "fame/h", "PvP win", "PvP die",
+    hdr = ["weapon", "armor kit", "base IP", "cost", "camps lowest HP @90/@50", "elite kills (worst camp)", "fame/h", "PvP win", "PvP die",
            "score", "score / 100k", "Q / W / E"]
     o = [f"## Build optimizer — {title} T{tier} · {', '.join(cls)} · {len(wfams)} weapons × {len(KITS)} armor kits × "
          f"{len(levels)} IP levels", "",

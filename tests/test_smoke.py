@@ -348,6 +348,22 @@ class Encounters(unittest.TestCase):
         self.assertIn("Camp simulation", encounter.camp_sim(self.BOW, "green", 6, "small", ips="avg=1250"))
 
 
+class EliteRisk(unittest.TestCase):
+    def test_graded_and_worst_map(self):
+        kit = next(k for k in optimizer.KITS if k[0].startswith("Mage Cowl · Cleric"))
+        lo = optimizer._loadout("2H_DEMONICSTAFF", kit, 1000, {})
+        key = encounter.resolve("mists")
+        _, kind, tier, _, cont = encounter.CONTENT[key]
+        p, mp, k = gearcheck.build_player(lo, {"spec_ip": 100}), encounter._maps(kind, tier, cont, 4), encounter.sim_calibration()["k"]
+        risk = [max(r["elite_death"] for r in encounter.simulate(encounter.Fighter(p, k * x), mp, 0.9)) for x in (0.8, 1.0, 1.2)]
+        self.assertGreater(risk[0], risk[1])                                    # less damage → more risk, no 0/1 cliff
+        self.assertGreater(risk[1], risk[2])
+        self.assertTrue(0.05 < risk[1] < 0.95)
+        s = encounter.pve_summary(lo, "mists", ip_spec={"spec_ip": 100})
+        self.assertAlmostEqual(s["elite"], risk[1])                             # worst map, not the median
+        self.assertLessEqual(s["low_worst"], s["low"])
+
+
 class MarketCache(unittest.TestCase):
     """Per-item cache, batching and 429 handling without the network (urlopen is faked)."""
     def setUp(self):

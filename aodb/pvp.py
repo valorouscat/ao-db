@@ -617,7 +617,7 @@ def farm_plan(loadout, contents=None, ips=None, silver_per_hour=None, encounters
         from . import encounter
         pve = encounter.pve_summary(loadout, k, ips) if k.startswith(("corrupted", "mists")) else None
         pve_txt = (f"T{pve['tier']}: {pve['low']:.0%} / {pve['low_pess']:.0%} HP, {pve['fame_h']:,.0f} fame/h"
-                   + (f", elite risk {pve['elite']:.0%}" if pve["elite"] >= 0.05 else "")) if pve else "—"
+                   + (f", elite risk {pve['elite']:.0%} at {pve['worst_map']}" if pve["elite"] >= 0.05 else "")) if pve else "—"
         rows.append((k, r["title"], "✅" if entry_ok else f"⛔ <{r['entry_ip']:.0f}", f"{me['eff_avg']:.0f}",
                      f"{win:.0%}" if win is not None else "n/a", f"{lose:.0%}" if lose is not None else "n/a", f"{e_h:g}",
                      f"×{r['loot']:g} / ×{r['silver']:g} / ×{r['fame']:g}", money(loss_h) if r["lethal"] else "0 (no loss)",

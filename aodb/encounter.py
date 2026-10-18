@@ -300,6 +300,16 @@ def sim_calibration():
 DEFAULT_K = 3.0  # used only when the journal has no usable real outcome
 
 
+ELITE_MARGIN = 0.25  # an elite pull won with less HP than this left is a coin flip, not a safe win (crit, missed dodge, lag)
+
+
+def _death_risk(r):
+    """Chance a fight kills you: 1 if the model dies, rising linearly as the HP left drops under ELITE_MARGIN."""
+    if r["died"] or r.get("timeout"):
+        return 1.0
+    return max(0.0, min(1.0, (ELITE_MARGIN - r["min_hp"]) / ELITE_MARGIN))
+
+
 def simulate(f, maps, dodge):
     res = []
     for name, pulls in maps:
@@ -312,10 +322,10 @@ def simulate(f, maps, dodge):
                 deaths += 1
             if r["min_hp"] < low or worst_pull is None:
                 low, worst_pull = min(low, r["min_hp"]), (pl, r)
-            if pl["elite"] > 0.02:  # an elite spawn here: chance-weighted extra danger
-                rw = fight(f, pl["worst"], dodge)
-                if rw["died"] or rw.get("timeout"):
-                    survive *= 1 - pl["elite"]
+            if pl["elite"] > 0.02:  # an elite spawn here: chance-weighted extra danger, graded by the HP margin and averaged
+                # with a bad-dodge fight so a near-death win doesn't read as 0% (the binary check flipped 0% ↔ 76%)
+                die = (_death_risk(fight(f, pl["worst"], dodge)) + _death_risk(fight(f, pl["worst"], min(dodge, gearcheck.DODGE_LOW)))) / 2
+                survive *= 1 - pl["elite"] * die
         res.append({"name": name, "pulls": len(pulls), "time": tot_t, "low": low, "deaths": deaths, "fame": fame,
                     "worst": worst_pull, "elite_death": 1 - survive})
     return res
@@ -416,7 +426,8 @@ def _cal_line(cal):
 
 
 def pve_summary(loadout, content, ips=None, intents=None, maps=4, ip_spec=None):
-    """{'minutes', 'low', 'low_pess', 'fame_h', 'elite'} — median over maps, for farm_plan; None if not simulable."""
+    """{'minutes', 'low', 'low_pess', 'fame_h', 'elite', 'low_worst', 'worst_map'} — medians over maps, except the elite risk
+    and low_worst, which come from the worst map (a median hides the one camp that kills you); None if not simulable."""
     try:
         key = resolve(content)
     except AOError:
@@ -435,7 +446,8 @@ def pve_summary(loadout, content, ips=None, intents=None, maps=4, ip_spec=None):
     med = lambda xs: statistics.median(xs)
     mins = med([r["time"] for r in hi]) * cal["ts"] / 60
     return {"minutes": mins, "low": med([r["low"] for r in hi]), "low_pess": med([r["low"] for r in lo]),
-            "fame_h": med([r["fame"] for r in hi]) * rules["fame"] / max(mins, 0.1) * 60, "elite": med([r["elite_death"] for r in hi]),
+            "fame_h": med([r["fame"] for r in hi]) * rules["fame"] / max(mins, 0.1) * 60, "elite": max(r["elite_death"] for r in hi),
+            "low_worst": min(r["low"] for r in hi), "worst_map": max(hi, key=lambda r: (r["elite_death"], -r["low"]))["name"],
             "tier": tier}
 
 
