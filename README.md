@@ -46,6 +46,7 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 | `craft_profit` | прибыль крафта: материалы с возвратом, налог станка, налоги рынка, маржа |
 | `build_cost` | стоимость комплекта снаряжения по живым ценам, IP, сравнение .0–.3 |
 | `gear_check` | по комплекту игрока (экспорт сборки из игры, JSON): IP, набор умений, расходники, сила охраны лагеря на каждой стадии и тире, запас IP с вердиктом, стоимость переодевания |
+| `group_check` | прогноз для небольшой группы (2–3, до 5): роли по `itemroles.json`, суммарный урон и живучесть (танк, хил, поддержка), вердикт по тирам и стадиям, пробелы состава, лут на человека, суммарный риск |
 | `chest_value` | ожидаемая ценность сундуков через таблицы лута (Авалон, коррапты, хеллгейты, мисты…) |
 | `meta_builds` | статистика официального киллборда: K/D оружия, что носят игроки с этим оружием |
 | `difficulty` | множители лута, серебра и славы, баффы мобов и требования IP по уровням: зачарование подземелий, комнаты боссов, цвет зоны и качество региона Запределья, мисты, Глубины, драконьи зоны, экспедиции, коррапты, хеллгейты, налоги |
@@ -86,6 +87,8 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 ./ao build-cost T8_2H_BOW T8_HEAD_LEATHER_SET1 T8_ARMOR_LEATHER_SET1 T8_SHOES_LEATHER_SET1 T8_CAPEITEM_FW_MARTLOCK "10x T8_MEAL_STEW"
 ./ao meta-builds --weapon "T8 bow" --pages 20
 ./ao gear-check @my_loadout.json --content green --avg-ip 1250 --slot-ip "mainhand=1300,head=1240"
+./ao group-check @examples/loadouts/bow_badon.json @examples/loadouts/mace_tank.json @examples/loadouts/holy_healer.json \
+    --content blue --ips "avg=1250,mainhand=1300 | avg=1150 | avg=1150"
 ./ao mechanics corrupted
 ./ao patchnotes "roads of avalon chests"
 ./ao patchnotes broadsword --since 2026-01-01

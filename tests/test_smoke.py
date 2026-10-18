@@ -1,5 +1,5 @@
 """Smoke tests against a built ao.db. Run: python3 -m unittest discover tests  (AO_NET=1 also hits the market API)."""
-import json, os, unittest
+import json, os, re, unittest
 import tempfile
 from unittest import mock
 from aodb import advisor, core, gearcheck, market, mcp_server, patchnotes
@@ -119,6 +119,26 @@ class GearCheck(unittest.TestCase):
         t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
         self.assertIn("Invisibility Potion", t)
         self.assertIn("verdict", t)
+
+
+class GroupCheck(unittest.TestCase):
+    EX = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "loadouts")
+
+    def test_roles(self):
+        for f, role in (("bow_badon.json", "Ranged_DPS"), ("mace_tank.json", "Tank"), ("holy_healer.json", "Heal")):
+            _, e = gearcheck.parse_loadout("@" + os.path.join(self.EX, f))
+            self.assertEqual(gearcheck.detect_role(e)[0], role)
+
+    def test_group_beats_solo_and_composition_matters(self):
+        lo = ["@" + os.path.join(self.EX, f) for f in ("bow_badon.json", "mace_tank.json", "holy_healer.json")]
+        trio = gearcheck.group_check(lo, "blue", ips="avg=1250,mainhand=1300 | avg=1150 | avg=1150", tiers=["6"], price=False)
+        duo = gearcheck.group_check(lo[:1] * 2, "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300", tiers=["6"], price=False)
+        ip = lambda t: float(re.search(r"one player at \*\*(\d+) IP", t).group(1))
+        self.assertGreater(ip(trio), ip(duo))
+        self.assertIn("no tank", duo)
+        self.assertIn("Loot per player", trio)
+        solo_anchor = gearcheck.required_ip({"tier": 6, "F": gearcheck.anchor_F(6)})
+        self.assertAlmostEqual(solo_anchor, 900, places=6)
 
 
 class PatchNotes(unittest.TestCase):

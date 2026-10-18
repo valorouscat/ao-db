@@ -492,6 +492,7 @@ def notes(query=None, limit=5):
     if not hits:
         hits = db.execute("SELECT name, body FROM n WHERE n MATCH ? ORDER BY bm25(n) LIMIT ?",
                           (" OR ".join(core.fts_query(query).split()), limit)).fetchall()
+    db.close()
     return "\n\n---\n\n".join(f"<!-- {n} -->\n{_staleness(b)}{b}" for n, b in hits) or f"No notes match {query!r}"
 
 

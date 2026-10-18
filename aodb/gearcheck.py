@@ -6,7 +6,8 @@ Model (transparent, documented in the output):
 - Per +100 IP the game scales weapon damage ×1.0918 and survivability ×≈1.0918 (HP ×1.06 · armor ×1.03), so a fight's
   balance (enemy HP × enemy DPS vs player DPS × player EHP) shifts by ×1.192 per 100 IP (gamedata.json ItemPowerProgression).
 - Content strength: guards of the camp at each chest stage (templates + randomspawnbehaviors + mobs). The base stage of a
-  camp of tier T is assumed to be tuned for tier-T .0 gear; higher stages need extra IP = 100·ln(F_stage/F_base)/ln(1.192),
+  solo (green) camp of tier T is assumed to be tuned for tier-T .0 gear (the common anchor for all camps); any camp/stage needs
+  IP = par + 100·ln(F/F_anchor)/ln(1.192),
   where F = HP × DPS of the hardest pull (the camp boss slot, or the 3 strongest guards).
 """
 import json, math, re
@@ -21,7 +22,7 @@ STAGE_NAMES = {"small": 0, "малый": 0, "base": 0, "medium": 1, "средн�
 CONTENT = {
     "avalon_solo": ("AVALON_SMALL_SOLO", "Roads of Avalon solo camps (green)", [4, 6, 8]),
     "avalon_veteran": ("AVALON_MEDIUM_VETERAN", "Roads of Avalon veteran camps (blue)", [4, 6, 8]),
-    "avalon_elite": ("AVALON_SMALL_ELITE", "Roads of Avalon elite camps (gold)", [4, 6, 8]),
+    "avalon_elite": ("AVALON_MEDIUM_ELITE", "Roads of Avalon elite camps (gold)", [6, 8]),
 }
 ALIASES = {"green": "avalon_solo", "зел": "avalon_solo", "solo": "avalon_solo", "blue": "avalon_veteran", "син": "avalon_veteran",
            "veteran": "avalon_veteran", "gold": "avalon_elite", "зол": "avalon_elite", "elite": "avalon_elite"}
@@ -198,13 +199,30 @@ def content_profile(behaviour, tiers):
         if not layer:
             continue
         spawns = json.loads(layer["spawns"])
-        spawns = {k: v for k, v in spawns.items() if re.match(rf"T{t}_", k) or k.startswith("ROAMING")}
+        spawns = {k: v for k, v in spawns.items() if re.match(rf"T{t}_", k) or re.search(rf"_T{t}$", k) or k.startswith("ROAMING")}
         for i, st in enumerate(stages):
             guards = camp_at_stage(spawns, st["level"])
             f, _ = _hardest_pull(guards)
             out.append({"tier": t, "stage": i, "chest": st["chest"], "level": st["level"], "weight": st["weight"], "guards": guards,
                         "F": f, "template": f"{layer['template']} › {layer['layer']}"})
     return out
+
+
+_anchor_cache = {}
+
+
+def anchor_F(tier):
+    """Hardest-pull strength of a base-stage solo Avalon camp of this tier — the reference tuned for tier-T .0 gear."""
+    if tier not in _anchor_cache:
+        prof = content_profile("AVALON_SMALL_SOLO", [tier])
+        _anchor_cache[tier] = next((p["F"] for p in prof if p["stage"] == 0), None)
+    return _anchor_cache[tier]
+
+
+def required_ip(p):
+    par = 700 + 100 * (p["tier"] - 4)
+    ref = anchor_F(p["tier"])
+    return par + (100 * math.log(p["F"] / ref) / PER100 if ref and p["F"] else 0)
 
 
 def _verdict(margin):
@@ -273,14 +291,11 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
     # content
     o.append(f"\n### Content strength — chest behaviour `{behaviour}` (stages: " +
              ", ".join(f"{s['chest'].split('_')[-1]} weight {fmt(s['weight'])}" for s in prof[:3]) + ")")
-    base = {p["tier"]: p["F"] for p in prof if p["stage"] == 0}
     res = []
     for p in prof:
         if want is not None and p["stage"] not in want:
             continue
-        par = 700 + 100 * (p["tier"] - 4)
-        extra = 100 * math.log(p["F"] / base[p["tier"]]) / PER100 if base.get(p["tier"]) and p["F"] else 0
-        need = par + extra
+        need = required_ip(p)
         margin = fight_ip - need
         strongest = max(p["guards"], key=lambda g: g["hp"] * g["dps"]) if p["guards"] else None
         res.append((f"T{p['tier']}", ["small", "medium", "large"][p["stage"]] if p["stage"] < 3 else p["stage"], len(p["guards"]),
@@ -314,4 +329,176 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
              "= 100·ln(F_stage/F_base)/ln(1.192), F = HP×DPS of the hardest pull (boss slot or 3 strongest guards); "
              "+100 IP ≈ ×1.0918 damage (weapon) and ×1.0918 survivability (armor) (gamedata.json); model IP = mean of weapon and armor IP. Ignores player skill, spec, resistances, mechanics, "
              "and PvP risk — use it to compare options, not as a guarantee._")
+    return "\n".join(o)
+
+
+# ------------------------------------------------------------------ small groups (2-3 players)
+# Role factors are model assumptions (documented in the output). Role detection uses itemroles.json (party context).
+ROLE_FACTORS = {  # damage share, survivability when focused
+    "Tank": (0.6, 1.6), "DPS": (1.0, 1.0), "Ranged_DPS": (1.0, 1.0), "Support": (0.6, 1.0), "Heal": (0.3, 1.0),
+}
+HEAL_BONUS = (0.8, 0.4)        # focused target survivability +80% from the 1st healer, +40% from the 2nd
+SUPPORT_DMG = 0.15             # arcane-style support: +15% group damage each
+SPREAD_BONUS = 0.25            # no tank: aggro can be swapped/kited, +25% per extra player
+
+
+def detect_role(entries):
+    rows = q("SELECT json FROM docs WHERE file='itemroles.json'")
+    ratings = {}
+    for r in rows:
+        d = json.loads(r["json"])
+        if d.get("@context") != "party":
+            continue
+        cats = d.get("category") or []
+        ratings[d["@baserole"]] = {c["@value"]: float(c["@rating"]) for c in (cats if isinstance(cats, list) else [cats])}
+    weapon = next((e["row"] for e in entries if e["row"]["slot"] == "mainhand" and not e["inventory"]), None)
+    armor = next((e["row"] for e in entries if e["row"]["slot"] == "armor" and not e["inventory"]), None)
+    score = {}
+    for role, cats in ratings.items():
+        if role == "BattleMount":
+            continue
+        score[role] = 2 * cats.get(weapon["sub1"] if weapon else "", 0) + cats.get(armor["sub1"] if armor else "", 0)
+    role = max(score, key=score.get) if score and max(score.values()) > 0 else "DPS"
+    return role, score
+
+
+def _raw_loadout(lo):
+    if isinstance(lo, dict):
+        return lo
+    s = lo.strip()
+    if s.startswith("@"):
+        with open(s[1:], encoding="utf-8") as fh:
+            s = fh.read()
+    return json.loads(s)
+
+
+def chest_offline_values(behaviour, tier):
+    """{chest name: expected value (game item value units)} for the stages of a chest behaviour."""
+    ev, out = advisor.LootEV(), {}
+    for r in q("SELECT name, json FROM chests WHERE name LIKE ?", behaviour + "%"):
+        lists = advisor._chest_lists(json.loads(r["json"]), tier)
+        if not lists:
+            continue
+        wsum = sum(w for _, w, _ in lists)
+        out[r["name"]] = sum(w / wsum * sum(n * advisor._offline_value(i) for i, n in ev.expected(ln).items()) for _, w, ln in lists)
+    return out
+
+
+def _parse_ips(ips, n):
+    """'avg=1250,mainhand=1300 | avg=1180' → [{'avg_ip':1250,'slot_ip':{...}}, ...]"""
+    out = [{} for _ in range(n)]
+    if not ips:
+        return out
+    chunks = ips if isinstance(ips, list) else str(ips).split("|")
+    for i, chunk in enumerate(chunks[:n]):
+        slots = {}
+        for part in re.split(r"[,;\s]+", chunk.strip()):
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            if k.strip().lower() in ("avg", "average", "avg_ip", "средний"):
+                out[i]["avg_ip"] = float(v)
+            else:
+                slots[k] = v
+        if slots:
+            out[i]["slot_ip"] = slots
+    return out
+
+
+def group_check(loadouts, content="avalon_veteran", ips=None, tiers=None, stages=None, server="europe", city="Caerleon", price=True):
+    """Predict how a 2-3 player group performs in PvE camps: roles, combined power, per-tier/stage verdict, loot split, risk."""
+    if isinstance(loadouts, str):
+        loadouts = [loadouts]
+    if not 2 <= len(loadouts) <= 5:
+        raise AOError("Give 2-5 loadouts (one per player)")
+    key = content if content in CONTENT else next((v for a, v in ALIASES.items() if a in (content or "").lower()), None)
+    if not key:
+        raise AOError(f"Unknown content {content!r}. Supported: {', '.join(CONTENT)}")
+    behaviour, title, default_tiers = CONTENT[key]
+    tiers = [int(t) for t in (tiers or default_tiers)]
+    want = {STAGE_NAMES.get(str(x).lower(), x) for x in stages} if stages else None
+    per_ip = _parse_ips(ips, len(loadouts))
+    players = []
+    for i, lo in enumerate(loadouts):
+        name, entries = parse_loadout(lo)
+        raw = _raw_loadout(lo)
+        avg_ip = per_ip[i].get("avg_ip") or raw.get("avg_ip") or raw.get("avgIp")
+        slot_ip = per_ip[i].get("slot_ip") or raw.get("slot_ip") or raw.get("slotIp")
+        game_avg, rows = loadout_ip(entries, 0, None, slot_ip, avg_ip)
+        weapon = next((r[1] for r in rows if r[0] == "mainhand"), game_avg)
+        armor = [r[1] for r in rows if r[0] in ("head", "armor", "shoes")]
+        armor = sum(armor) / len(armor) if armor else game_avg
+        role, _ = detect_role(entries)
+        flags, _ = kit(entries)
+        players.append({"name": name, "entries": entries, "avg": game_avg, "weapon": weapon, "armor": armor, "role": role,
+                        "flags": flags, "explicit": bool(avg_ip or slot_ip)})
+    # combined power
+    dmg = sum(ROLE_FACTORS.get(p["role"], (1, 1))[0] * 1.0918 ** ((p["weapon"] - 1000) / 100) for p in players)
+    dmg *= 1 + SUPPORT_DMG * sum(1 for p in players if p["role"] == "Support")
+    tanks = [p for p in players if p["role"] == "Tank"]
+    focus = max(tanks or players, key=lambda p: p["armor"] * ROLE_FACTORS.get(p["role"], (1, 1))[1])
+    surv = 1.0918 ** ((focus["armor"] - 1000) / 100) * ROLE_FACTORS.get(focus["role"], (1, 1))[1]
+    healers = [p for p in players if p["role"] == "Heal"]
+    surv *= 1 + sum(HEAL_BONUS[i] if i < len(HEAL_BONUS) else 0.2 for i in range(len(healers)))
+    if not tanks:
+        surv *= 1 + SPREAD_BONUS * (len(players) - 1)
+    balance = dmg * surv
+    group_ip = 1000 + 100 * math.log(balance) / PER100
+
+    o = [f"## Group check ({len(players)} players) → {title}", ""]
+    o.append(table([(i + 1, p["name"], p["role"].replace("_", " "), f"{p['avg']:.0f}" + ("" if p["explicit"] else " (no mastery given)"),
+                     f"{p['weapon']:.0f}", f"{p['armor']:.0f}", label(next((e['id'] for e in p['entries'] if e['row']['slot'] == 'mainhand'), '')),
+                     ", ".join(f for f, v in p["flags"].items() if v)) for i, p in enumerate(players)],
+                   ["#", "loadout", "role", "avg IP", "weapon IP", "armor IP", "weapon", "kit"]))
+    comp = []
+    if not tanks:
+        comp.append("no tank: mobs hit whoever has aggro — kite and swap aggro (modelled as +25% survivability per extra player)")
+    if not healers:
+        comp.append("no healer: sustain only from lifesteal/self-heals and potions")
+    if not any(p["flags"]["AoE"] for p in players):
+        comp.append("no AoE in the group")
+    cc = sum(len(p["flags"]["crowd control"]) for p in players)
+    comp.append(f"crowd control sources: {cc}")
+    o.append("\n**Composition:** " + "; ".join(comp))
+    o.append(f"\n**Group power** ≈ one player at **{group_ip:.0f} IP** (damage ×{dmg:.2f}, focused target `{focus['name']}` "
+             f"survivability ×{surv:.2f}, both relative to a 1000-IP solo DPS).")
+    # content
+    prof = content_profile(behaviour, tiers)
+    intent = {"avalon_solo": (1, 1), "avalon_veteran": (2, 5), "avalon_elite": (5, 20)}[key]
+    res = []
+    for p in prof:
+        if want is not None and p["stage"] not in want:
+            continue
+        need = required_ip(p)
+        margin = group_ip - need
+        strongest = max(p["guards"], key=lambda g: g["hp"] * g["dps"]) if p["guards"] else None
+        res.append((f"T{p['tier']}", ["small", "medium", "large"][min(p["stage"], 2)], len(p["guards"]), f"{sum(g['hp'] for g in p['guards']):,.0f}",
+                    f"{strongest['name']} ({strongest['hp']:,.0f} HP)" if strongest else "", f"{need:.0f}", f"{margin:+.0f}", _verdict(margin)))
+    o.append(f"\n### Content strength — `{behaviour}`\n" +
+             table(res, ["roads tier", "chest", "guards", "total HP", "strongest guard", "model IP needed", "margin", "verdict"]))
+    if not intent[0] <= len(players) <= intent[1]:
+        o.append(f"⚠ This content is intended for {intent[0]}–{intent[1]} players; with {len(players)} the "
+                 + ("loot is split between more people than needed" if len(players) > intent[1] else "camp is tuned for a bigger group"))
+    # loot split + risk
+    vals = [(t, n, v) for t in tiers for n, v in sorted(chest_offline_values(behaviour, t).items(), key=lambda x: x[1])]
+    if vals:
+        o.append("\n### Loot per player (chest model value ÷ players; game item value units — compare, don't read as silver)\n" +
+                 table([(f"T{t}", n.replace(behaviour + "_", "").lower(), fmt(round(v)), fmt(round(v / len(players)))) for t, n, v in vals],
+                       ["tier", "chest", "chest value", "per player"]))
+    if price:
+        total, lines = 0.0, []
+        for p in players:
+            prices = market.price_map([e["id"] for e in p["entries"]], server, city)
+            if market.WARNINGS:
+                lines.append(f"{p['name']}: price API unavailable ({'; '.join(market.WARNINGS)})")
+                break
+            v = sum((prices.get(e["id"], (None,))[0] or 0) * e["stack"] for e in p["entries"])
+            total += v
+            lines.append(f"{p['name']}: ≈{money(v)}")
+        o.append("\n### Risk (full loot)\nRe-gear per player (normal-quality prices, " + city + "): " + "; ".join(lines) +
+                 (f" — group total ≈ **{money(total)}**" if total else ""))
+    o.append("\n_Group model: damage = Σ role share × 1.0918^((weapon IP−1000)/100) (DPS 1.0, support 0.6 +15% group dmg, tank 0.6, "
+             "healer 0.3); survivability of the focused target = 1.0918^((armor IP−1000)/100) × (tank 1.6) × (1 + 0.8 first healer "
+             "+ 0.4 second) × (no tank: 1 + 0.25 per extra player). Group IP = 1000 + 100·ln(damage×survivability)/ln(1.192), "
+             "compared with the camp model of gear_check. Role factors are assumptions; coordination, mechanics and PvP are not modelled._")
     return "\n".join(o)

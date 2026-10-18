@@ -94,6 +94,16 @@ TOOLS = [
                      slot_ip=P(S, "In-game IP per slot incl. mastery, e.g. 'mainhand=1300,head=1240,armor=1260,shoes=1250,cape=1100'"),
                      avg_ip=P(I, "Character's average IP from the game; slots without explicit IP share the difference equally"), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
                      city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True))),
+    dict(name="group_check", fn=gearcheck.group_check,
+         desc="Predict how a small group (2-3, up to 5) performs in PvE camps: detects roles (itemroles.json), combines damage and "
+              "survivability (tank/healer/support factors), compares the group's power with each camp tier/stage, warns about "
+              "composition gaps and content group-size intent, splits loot per player and sums re-gear risk.",
+         params=dict(loadouts=P(A, "One loadout JSON (or @file) per player", required=True),
+                     content=P(S, "avalon_veteran (blue, default), avalon_solo (green), avalon_elite (gold)", "avalon_veteran"),
+                     ips=P(S, "In-game IP per player, players separated by '|': 'avg=1250,mainhand=1300 | avg=1180 | head=1200'"),
+                     tiers=P(A, "Content tiers, e.g. ['4','6','8']"), stages=P(A, "Chest stages: small, medium, large"),
+                     server=P(S, "Market server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     price=P(B, "Look up re-gear cost", True))),
     dict(name="chest_value", fn=advisor.chest_value,
          desc="Expected loot value of chests (Avalon roads, corrupted dungeons, hellgates, mists, static dungeons, treasure...) computed "
               "through the loot tables; ranks chests so you can tell which are worth opening.",
