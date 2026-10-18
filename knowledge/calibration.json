@@ -128,7 +128,8 @@
    "intents": null,
    "min_hp": 0.4,
    "consumables_used": "2x Poison Potion 6.0",
-   "notes": "Avalonian Knight ~13k HP; slow but easy, caught some damage, Bloodlust healed back"
+   "notes": "Avalonian Knight ~13k HP; confident, repeatable: several large chests cleared with this setup (recorded as 3 = minimum of 'several'); slow but easy, Bloodlust heals back",
+   "runs": 3
   }
  ]
 }

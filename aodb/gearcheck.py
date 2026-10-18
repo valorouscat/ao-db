@@ -662,9 +662,11 @@ def _content_section(o, behaviour, tiers, want, gp, solo, players, dodge=DODGE, 
     o.append("\n**Hardest pull (worst variant) and your defenses there**\n" +
              table(details, ["tier", "chest", "mobs in the pull", "pull HP", f"pull DPS @{dodge:.0%} dodge", "defense multiplier"]))
     if cal_info:
-        o.append(f"_Margins calibrated on **{cal_info['n']}** real outcome(s) from `knowledge/calibration.json`: offset "
+        o.append(f"_Margins calibrated on **{cal_info['runs']}** real run(s) in {cal_info['n']} distinct setup/content entr"
+                 f"{'y' if cal_info['n'] == 1 else 'ies'} from `knowledge/calibration.json`: offset "
                  f"{cal:+.0f} IP (residual spread ±{cal_info['spread']:.0f}); 'raw' = uncalibrated model. "
-                 + ("Low confidence — record more outcomes with `record_outcome`." if cal_info["n"] < 3 else "") + "_")
+                 + ("Few distinct setups/contents — the offset is uniform and may not transfer to other tiers, chest types or "
+                    "builds; record more outcomes with `record_outcome`." if cal_info["n"] < 3 else "") + "_")
     if heavy_all:
         o.append("**Telegraphed heavy hits (assumed dodged in the margins):** " + ", ".join(f"`{h}`" for h in sorted(heavy_all)[:10]))
 
@@ -861,22 +863,24 @@ _cal_cache = {}
 def calibration_offset():
     """Mean (target − model) margin over the journal, capped at ±400 IP; None when the journal is empty."""
     if "v" not in _cal_cache:
-        res = []
+        res = []  # (error, runs) — an entry with runs=N is the same setup/content cleared N times
         for obs in _cal_load():
             try:
-                res.append(OUTCOME_MARGIN[_norm_outcome(obs["outcome"])] - observation_margin(obs))
+                res.append((OUTCOME_MARGIN[_norm_outcome(obs["outcome"])] - observation_margin(obs), max(int(obs.get("runs") or 1), 1)))
             except (AOError, KeyError, StopIteration):
                 continue
         if not res:
             _cal_cache["v"] = None
         else:
-            off = max(-CAL_CAP, min(CAL_CAP, statistics.mean(res)))
-            _cal_cache["v"] = {"offset": off, "n": len(res), "spread": statistics.pstdev(res) if len(res) > 1 else 0.0}
+            w = sum(r for _, r in res)
+            mean = sum(e * r for e, r in res) / w
+            spread = (sum(r * (e - mean) ** 2 for e, r in res) / w) ** 0.5
+            _cal_cache["v"] = {"offset": max(-CAL_CAP, min(CAL_CAP, mean)), "n": len(res), "runs": w, "spread": spread}
     return _cal_cache["v"]
 
 
 def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=None, min_hp=None, consumables_used=None, notes=None,
-                   date=None, save=True):
+                   runs=1, date=None, save=True):
     """Add a real fight outcome to the calibration journal; returns the model's raw margin for it and the new offset."""
     if isinstance(loadouts, (str, dict)):
         loadouts = [loadouts]
@@ -890,7 +894,7 @@ def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=No
            "stage": stage, "outcome": _norm_outcome(outcome), "loadouts": los,
            "ips": ips if isinstance(ips, list) or ips is None else str(ips),
            "intents": (intents if isinstance(intents, list) else str(intents).split("|")) if intents else None,
-           "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
+           "runs": int(runs or 1), "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
     try:
         from . import patchnotes
         d_, t_ = patchnotes.current_patch()
@@ -907,7 +911,7 @@ def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=No
     out = [f"## Outcome {'recorded' if save else '(dry run)'}: T{obs['tier']} {stage} {content} → **{obs['outcome']}**",
            f"- model raw margin: **{raw:+.0f}** ({_verdict(raw)}) · target for '{obs['outcome']}': {target:+d} · error {target - raw:+.0f} IP"]
     if cal:
-        out.append(f"- calibration offset now **{cal['offset']:+.0f} IP** over {cal['n']} outcome(s) (spread ±{cal['spread']:.0f})")
+        out.append(f"- calibration offset now **{cal['offset']:+.0f} IP** over {cal['runs']} run(s) / {cal['n']} entr{'y' if cal['n'] == 1 else 'ies'} (spread ±{cal['spread']:.0f})")
     return "\n".join(out)
 
 
@@ -926,9 +930,9 @@ def calibration():
             r = ("—", "—", f"error: {e}")
         names = ", ".join(lo.get("name", "?") for lo in ob["loadouts"])
         rows.append((i + 1, ob.get("date", ""), ob.get("patch") or "", names, ob.get("ips") or "", f"{ob['content']} T{ob['tier']} {ob['stage']}",
-                     ob["outcome"], f"{ob['min_hp']:.0%}" if isinstance(ob.get("min_hp"), (int, float)) else "", *r, ob.get("notes") or ""))
+                     ob["outcome"], ob.get("runs") or 1, f"{ob['min_hp']:.0%}" if isinstance(ob.get("min_hp"), (int, float)) else "", *r, ob.get("notes") or ""))
     cal = calibration_offset()
-    return ("## Calibration journal\n" + table(rows, ["#", "date", "patch", "loadouts", "IP", "content", "outcome", "min HP", "model raw",
+    return ("## Calibration journal\n" + table(rows, ["#", "date", "patch", "loadouts", "IP", "content", "outcome", "runs", "min HP", "model raw",
                                                       "target", "error", "notes"]) +
             (f"\n\nOffset applied to gear_check/group_check margins: **{cal['offset']:+.0f} IP** (mean error, cap ±{CAL_CAP}; "
-             f"n={cal['n']}, spread ±{cal['spread']:.0f})." if cal else ""))
+             f"{cal['runs']} runs in {cal['n']} entries, spread ±{cal['spread']:.0f})." if cal else ""))
