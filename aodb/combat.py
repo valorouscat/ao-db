@@ -283,10 +283,14 @@ def mob_abilities(mob_id):
     if not stem or len(stem) < 8:
         return []
     out = []
+    mid = mob_id.upper()
+    # abilities of the boss / champion / elite variants share the prefab stem: keep them only for mobs of that rank
+    rank_ok = lambda sid: all(tag not in sid or tag in mid for tag in ("_BOSS", "_MINIBOSS", "_CHAMPION", "_ELITE", "_VETERAN"))
     lo = stem.upper() + "_"  # prefix range on the PK (ids are upper-case) instead of a full-scan LIKE
     for s in q("SELECT id, cooldown FROM spells WHERE id >= ? AND id < ? AND category IN ('damage','debuff','crowdcontrol','instant') "
                "AND cooldown > 2 ORDER BY rowid", lo, lo + "\uffff"):
-        if re.search(r"_(EFFECT|APPLY|SOUND|DAMAGE|KNOCKBACK|IMMUNITY|AURA|COUNTER|START|ONDEATH|VOICE\w*)$", s["id"]):
+        if re.search(r"_(EFFECT|APPLY|SOUND|DAMAGE|KNOCKBACK|IMMUNITY|AURA|COUNTER|START|ONDEATH|VOICE\w*)$", s["id"]) \
+                or not rank_ok(s["id"][len(lo) - 1:]):
             continue
         p = spell_profile(s["id"], "players")
         if p and p["dmg"] > 0:
@@ -294,6 +298,7 @@ def mob_abilities(mob_id):
     return out
 
 
+CASTER_CAP = 0.06  # ability DPS cap for mobs without auto-attacks: 6% of their HP per second
 HEAVY_HIT = 1500  # per-cast damage (after ability power) treated as a telegraphed heavy hit to dodge
 
 
@@ -315,8 +320,12 @@ def mob_combat(mob_id, solo=False):
     ap = (num(d.get("@abilitypower")) or 100) / 100
     auto = (r["damage"] or 0) * (num(d.get("@attackspeed")) or 1)
     groups, heavy = {}, []
-    for sid, dmg, cyc, aoe in mob_abilities(mob_id):
+    abil = mob_abilities(mob_id)
+    ids = {a[0] for a in abil}
+    for sid, dmg, cyc, aoe in abil:
         if solo is False and sid.endswith("_SOLO"):
+            continue
+        if solo and sid + "_SOLO" in ids:  # solo content uses the weaker _SOLO version
             continue
         hit = dmg * ap
         if hit >= HEAVY_HIT:
@@ -369,11 +378,19 @@ def single_hit(sid, depth=0, seen=None):
     return best
 
 
-def telegraphed(sid):
-    """Ground-targeted / area abilities with a wind-up can be dodged; instant targeted ones cannot."""
+def telegraphed(sid, depth=0):
+    """Dodgeable: ground-targeted / self-area abilities with a wind-up, or anything that shows a warning area on the ground
+    (spellindicationarea) itself or in the spells it applies; instant targeted ones cannot be dodged."""
     d = spell_json(sid) or {}
     windup = (num(d.get("@castingtime")) or 0) + (num(d.get("@hitdelay")) or 0)
-    return d.get("@target") in ("ground", "self") and windup >= 0.3 or (d.get("@target") == "ground")
+    if d.get("@target") == "ground" or (d.get("@target") == "self" and windup >= 0.3) or "spellindicationarea" in d:
+        return True
+    if depth < 2:
+        for k in ("applyspell", "multispell", "channelingspell"):
+            for ch in _aslist(d.get(k)):
+                if isinstance(ch, dict) and ch.get("@spell") and telegraphed(ch["@spell"], depth + 1):
+                    return True
+    return False
 
 
 @functools.lru_cache(maxsize=None)
@@ -386,15 +403,19 @@ def mob_profile(mob_id, solo=False):
     ap = (num(d.get("@abilitypower")) or 100) / 100
     auto = (r["damage"] or 0) * (num(d.get("@attackspeed")) or 1)
     groups, heavy = {}, []
-    for sid, dmg, cyc, aoe in mob_abilities(mob_id):
+    abil = mob_abilities(mob_id)
+    ids = {a[0] for a in abil}
+    for sid, dmg, cyc, aoe in abil:
         if solo is False and sid.endswith("_SOLO"):
+            continue
+        if solo and sid + "_SOLO" in ids:  # solo content uses the weaker _SOLO version
             continue
         hit = single_hit(sid) * ap
         if hit >= HEAVY_HIT:
             heavy.append((sid, round(hit)))
             continue
         g = _ability_group(sid)
-        dps = min(dmg * ap / cyc, 2 * auto)
+        dps = min(dmg * ap / cyc, 2 * auto if auto else CASTER_CAP * r["hp"])  # casters have no auto-attack
         if dps > groups.get(g, (0, False))[0]:
             groups[g] = (dps, telegraphed(sid))
     top = sorted(groups.values(), key=lambda x: -x[0])[:2]

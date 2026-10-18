@@ -2,7 +2,7 @@
 import json, os, re, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, gearcheck, market, mcp_server, patchnotes, pvp
+from aodb import advisor, core, encounter, gearcheck, market, mcp_server, patchnotes, pvp
 from aodb.tools import TOOLS, call
 
 
@@ -303,6 +303,35 @@ class PvP(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("AO_NET"), "network")
     def test_killboard_builds(self):
         self.assertIn("model win rate", pvp.pvp_builds("mists_black", pages=4, top=3))
+
+
+class Encounters(unittest.TestCase):
+    BOW = "@" + os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples", "loadouts", "bow_badon.json")
+
+    def test_spawn_tiers_and_maps(self):
+        opts = encounter.spawn_options("ROAMING_HERETIC_CAMP_ANY", 6, "Mists")
+        self.assertTrue(all("MISTS" in m for m, _, _ in opts))           # the Mists variant, not the Royal one
+        self.assertAlmostEqual(sum(pr for _, pr, _ in opts), 1.0, places=6)
+        self.assertTrue(encounter._maps("corrupted", 6, None, 2))        # concrete corrupted dungeon maps
+        self.assertTrue(encounter._maps("mists", 6, "Mists", 2))
+
+    def test_mob_abilities(self):
+        from aodb import combat
+        archer = combat.mob_profile("T6_MOB_CAMP_MISTS_UNDEAD_ARCHER", True)
+        self.assertNotIn("MOB_UNDEAD_ARCHER_BOSS_CHAIN_LIGHTNING", archer["abilities"])   # boss spell not on a normal mob
+        self.assertTrue(combat.telegraphed("MOB_UNDEAD_ARCHER_SKILLSHOT"))                # warning area on the ground
+        self.assertGreater(combat.mob_profile("T6_MOB_CD_DEMON_SORCERER", True)["dodgeable"], 0)  # caster without autos
+
+    def test_fight_and_sim(self):
+        p = gearcheck.build_player(self.BOW, {"avg_ip": 1250})
+        strong, weak = encounter.Fighter(p, 3.0), encounter.Fighter(p, 0.5)
+        knight = gearcheck._variant("T6_AVALON_SOLO_BOSS_ANY", 8, True)
+        a, b = encounter.fight(strong, [(knight, 1)], 0.9), encounter.fight(weak, [(knight, 1)], 0.9)
+        self.assertLess(a["time"], b["time"])                            # more damage kills faster
+        t = encounter.encounter_sim(self.BOW, "stalker", ips="avg=1250", maps=2)
+        self.assertIn("after the 1000 soft cap", t)
+        self.assertIn("fame / hour", t)
+        self.assertIn("Camp simulation", encounter.camp_sim(self.BOW, "green", 6, "small", ips="avg=1250"))
 
 
 @unittest.skipUnless(os.environ.get("AO_NET"), "set AO_NET=1 to test the live market API")

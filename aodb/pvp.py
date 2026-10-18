@@ -614,18 +614,24 @@ def farm_plan(loadout, contents=None, ips=None, silver_per_hour=None, encounters
         loss_h = e_h * (lose or 0.5) * regear if r["lethal"] else 0.0
         entry_ok = not r["entry_ip"] or me["avg"] >= r["entry_ip"]
         net = f"{money(sph[k] - loss_h)}" if k in sph else "—"
+        from . import encounter
+        pve = encounter.pve_summary(loadout, k, ips) if k.startswith(("corrupted", "mists")) else None
+        pve_txt = (f"T{pve['tier']}: {pve['low']:.0%} / {pve['low_pess']:.0%} HP, {pve['fame_h']:,.0f} fame/h"
+                   + (f", elite risk {pve['elite']:.0%}" if pve["elite"] >= 0.05 else "")) if pve else "—"
         rows.append((k, r["title"], "✅" if entry_ok else f"⛔ <{r['entry_ip']:.0f}", f"{me['eff_avg']:.0f}",
                      f"{win:.0%}" if win is not None else "n/a", f"{lose:.0%}" if lose is not None else "n/a", f"{e_h:g}",
                      f"×{r['loot']:g} / ×{r['silver']:g} / ×{r['fame']:g}", money(loss_h) if r["lethal"] else "0 (no loss)",
-                     money(loss_h) if r["lethal"] else "any", net))
+                     money(loss_h) if r["lethal"] else "any", net, pve_txt))
     o = [f"## Farm plan for “{base_player['name']}”", "",
          f"Re-gear cost ≈ **{money(regear)}** ({city}, quality 1)" + (f" · {'; '.join(market.WARNINGS)}" if market.WARNINGS else ""), "",
          table(rows, ["key", "content", "entry", "eff. IP", "win vs meta", "die vs meta", "fights/h (assumed)",
-                      "loot / silver / fame", "expected loss /h", "break-even silver/h", "net /h (your silver/h)"]),
+                      "loot / silver / fame", "expected loss /h", "break-even silver/h", "net /h (your silver/h)",
+                      "monsters (lowest HP @90% / @50% dodge, fame/h)"]),
          "\n_Expected loss/h = fights per hour × chance to die × re-gear (full-loot zones only). A content is worth it when its "
          "silver/hour beats the break-even. Fights per hour are assumptions (override `encounters_per_hour`, e.g. "
          "'mists_black=2,corrupted_stalker=1'); give your measured `silver_per_hour` to get net profit. Reward multipliers come "
-         "from ClusterDangerBonus and stack with tier and chest rarity._\n" + PVP_NOTE]
+         "from ClusterDangerBonus and stack with tier and chest rarity. Monsters column: encounter_sim over the content's maps "
+         "(corrupted dungeons / Mists camps) — run it for details._\n" + PVP_NOTE]
     return "\n".join(o)
 
 

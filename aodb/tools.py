@@ -1,5 +1,5 @@
 """Single registry of operations. The CLI and the MCP server are both generated from it."""
-from . import advisor, core, gearcheck, market, patchnotes, pvp
+from . import advisor, core, encounter, gearcheck, market, patchnotes, pvp
 
 S, I, N, B, A = "string", "integer", "number", "boolean", "array"
 Q_ITEM = "Item ID (T4_MAIN_SWORD@2) or name in any language, optional tier prefix ('6.1 broadsword', 'T8 палаш')"
@@ -128,10 +128,31 @@ TOOLS = [
                      intents=P(S, "Spell intents per player separated by '|'"), min_hp=P(N, "Lowest HP share during the fight, 0-1"),
                      consumables_used=P(S, "Consumables used, e.g. '2x T6 poison potion'"), notes=P(S, "Free-text notes"),
                      runs=P(I, "How many times this setup cleared this content with this outcome (repeat confirmations)", 1),
+                     clear_minutes=P(N, "How long the clear took, minutes (calibrates simulated times)"),
                      mastery=P(I, "Average mastery/spec level of the gear (info; the IP values already include it)"),
                      save=P(B, "Write to the journal (false = dry run)", True))),
     dict(name="calibration", fn=gearcheck.calibration,
          desc="Calibration journal: every recorded real outcome vs the current model's raw margin, and the offset applied.", params={}),
+    dict(name="encounter_sim", fn=encounter.encounter_sim,
+         desc="Second-by-second fights against the concrete monsters of a content: corrupted dungeon maps (rooms with their active "
+              "layers), Mists camps, Mists dungeon, hellgate PvE. Per map: pulls, clear time, lowest HP at 90% / 50% dodge, failed "
+              "pulls, chance a rare elite spawn kills you, fame and fame/hour; hardest pull, heavy telegraphed hits. Player damage "
+              "from the real kit, IP after the zone soft cap; damage and time calibrated on the real-outcome journal.",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export) or @file", required=True),
+                     content=P(S, "corrupted_hunter / corrupted_stalker / corrupted_slayer, mists, mists_yellow, mists_dungeon, hellgate",
+                               "corrupted_stalker"),
+                     tier=P(I, "Content tier (default: the content's own — corrupted 5/6/8, mists 6)"),
+                     ips=P(S, "In-game IP incl. mastery and max HP: 'avg=1225,mainhand=1300,hp=2500'"),
+                     intents=P(S, "Spell choice in words when the loadout lacks spells ('Q W на урон')"),
+                     dodge=P(N, "Share of telegraphed ability damage dodged", 0.9), dodge_low=P(N, "Pessimistic dodge", 0.5),
+                     maps=P(I, "Maps / camp templates to simulate", 8))),
+    dict(name="camp_sim", fn=encounter.camp_sim,
+         desc="The same second-by-second fight on Roads of Avalon camps (every template variant of a chest stage): clear time, "
+              "lowest HP of the median and the worst variant, share of variants with a failed pull, both dodge scenarios.",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export) or @file", required=True),
+                     content=P(S, "green / blue / gold", "green"), tier=P(I, "Tier", 6), stage=P(S, "small / medium / large", "large"),
+                     ips=P(S, "In-game IP incl. mastery and max HP"), intents=P(S, "Spell choice in words"),
+                     dodge=P(N, "Dodge share", 0.9), dodge_low=P(N, "Pessimistic dodge", 0.5))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "

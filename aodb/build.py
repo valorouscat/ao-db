@@ -4,8 +4,9 @@
 Usage: python3 -m aodb.build [--repo PATH] [--db PATH] [--regions]
 """
 import argparse, json, os, re, sqlite3, sys, time, glob
+from collections import Counter
 
-SCHEMA_VERSION = "3"  # bump when tables/indexes change: core.info and the SessionStart hook then ask for a rebuild
+SCHEMA_VERSION = "4"  # bump when tables/indexes change: core.info and the SessionStart hook then ask for a rebuild
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
 LANGS = ["EN-US", "RU-RU", "DE-DE", "FR-FR", "PL-PL", "ES-ES", "PT-BR", "IT-IT",
          "ZH-CN", "KO-KR", "JA-JP", "ZH-TW", "ID-ID", "TR-TR", "AR-SA"]
@@ -54,6 +55,15 @@ CREATE INDEX modifiers_src ON modifiers(source, grp);
 CREATE TABLE spawnbehaviors(name TEXT PRIMARY KEY, faction TEXT, mobs TEXT);
 CREATE TABLE chest_upgrades(name TEXT PRIMARY KEY, marker TEXT, stages TEXT, json TEXT);
 CREATE TABLE camps(template TEXT, layer TEXT, chest_tile TEXT, chest_behaviour TEXT, spawns TEXT, guards TEXT);
+-- per-tier variants of spawn behaviours (randomspawnbehaviors.json clustertype): mobs with weights and upgrade level
+CREATE TABLE spawn_tiers(name TEXT, tier INT, continent TEXT, mobs TEXT);
+CREATE INDEX spawn_tiers_name ON spawn_tiers(name, tier);
+-- instanced / mists map templates: every mob spawn point with position, and loot chest spawn points
+CREATE TABLE encounters(content TEXT, template TEXT PRIMARY KEY, layers TEXT, guards TEXT, chests TEXT);
+CREATE INDEX encounters_content ON encounters(content);
+-- concrete maps (cluster files) built from those templates: instances with their active layers
+CREATE TABLE runs(content TEXT, cluster TEXT PRIMARY KEY, tier INT, instances TEXT);
+CREATE INDEX runs_content ON runs(content, tier);
 CREATE INDEX camps_beh ON camps(chest_behaviour);
 CREATE TABLE clusters(idx TEXT PRIMARY KEY, name TEXT, file TEXT, type TEXT, biome TEXT, tier INT, zone TEXT);
 CREATE VIRTUAL TABLE clusters_fts USING fts5(idx, name, file, tokenize='unicode61');
@@ -355,6 +365,16 @@ class Builder:
                     for m in aslist(d.get("mob")) if isinstance(m, dict)]
             rows.append((b["@name"], d.get("@faction"), json.dumps(mobs)))
         self.db.executemany("INSERT OR REPLACE INTO spawnbehaviors VALUES(?,?,?)", rows)
+        tiers = []
+        for b in aslist(rsb.get("spawnbehavior")):
+            for ct in aslist(b.get("clustertype")):
+                if not isinstance(ct, dict) or not ct.get("@tier"):
+                    continue
+                mobs = [{"mob": m.get("@name"), "weight": num(m.get("@weight")) or 1, "level": int(num(m.get("@mobUpgradeLevelIndex")) or 0)}
+                        for m in aslist(ct.get("mob")) if isinstance(m, dict) and m.get("@name")]
+                if mobs:
+                    tiers.append((b["@name"], int(num(ct["@tier"])), ct.get("@continents"), json.dumps(mobs)))
+        self.db.executemany("INSERT INTO spawn_tiers VALUES(?,?,?,?)", tiers)
         lc = load(self.repo, "lootchests.json")["LootChests"]
         up = []
         for c in aslist(lc.get("LootChestSpawnpointChestUpgrade")):
@@ -397,6 +417,46 @@ class Builder:
                     camps.append((os.path.basename(path).replace(".template.xml", ""), lm.group(1), ct, tiles.get(ct), json.dumps(spawns),
                                   json.dumps(gs)))
         self.db.executemany("INSERT INTO camps VALUES(?,?,?,?,?,?)", camps)
+        # instanced content and the Mists: whole templates (rooms / map tiles) with every spawn point and chest, per layer
+        kinds = [("CORRUPT_", "corrupted"), ("MISTS_DNG", "mists_dungeon"), ("MISTS_", "mists"), ("HELLDNG_", "depths"), ("Hellgate_", "hellgate")]
+        mob_re = re.compile(r'<tile name="[^"]*" pos="([-\d.]+) [-\d.]+ ([-\d.]+)"[^>]*>\s*<mobspawnpoint[^>]*spawnbehavior="([^"]+)"')
+        chest_re = re.compile(r'tile name="(SpawnPoint_LOOTCHEST[^"]*)" pos="([-\d.]+) [-\d.]+ ([-\d.]+)"')
+        enc, kind_of = [], {}
+        for path in glob.glob(os.path.join(self.repo, "templates", "*", "*.template.xml")):
+            base = os.path.basename(path).replace(".template.xml", "")
+            kind = next((k for pre, k in kinds if base.startswith(pre)), None)
+            if not kind:
+                continue
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                txt = fh.read()
+            layers, guards, chests = {}, [], []
+            parts = [(lm.group(1), lm.group(2), lm.group(3)) for lm in re.finditer(r'<layer id="([^"]+)" name="([^"]*)">(.*?)</layer>', txt, re.S)]
+            rest = re.sub(r'<layer id="[^"]+" name="[^"]*">.*?</layer>', "", txt, flags=re.S)
+            for lid, lname, body in parts + [(None, "", rest)]:
+                if lid:
+                    layers[lid] = lname
+                guards += [[m.group(3), round(float(m.group(1)), 1), round(float(m.group(2)), 1), lid] for m in mob_re.finditer(body)]
+                chests += [[m.group(1), tiles.get(m.group(1)), round(float(m.group(2)), 1), round(float(m.group(3)), 1), lid]
+                           for m in chest_re.finditer(body)]
+            kind_of[base] = kind
+            if guards or chests:
+                enc.append((kind, base, json.dumps(layers), json.dumps(guards), json.dumps(chests)))
+        self.db.executemany("INSERT OR REPLACE INTO encounters VALUES(?,?,?,?,?)", enc)
+        runs = []
+        for path in glob.glob(os.path.join(self.repo, "cluster", "*.cluster.xml")):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                txt = fh.read()
+            inst = [(m.group(1), re.findall(r'<activelayer id="([^"]+)"', m.group(2) or "")) for m in
+                    re.finditer(r'<templateinstance [^>]*ref="([^"]+)"[^>]*?(?:/>|>(.*?)</templateinstance>)', txt, re.S)]
+            inst = [(t, ls) for t, ls in inst if t in kind_of]
+            if not inst:
+                continue
+            kind = Counter(kind_of[t] for t, _ in inst).most_common(1)[0][0]
+            tm = re.search(r"_T(\d)_", os.path.basename(path))
+            runs.append((kind, os.path.basename(path).replace(".cluster.xml", ""), int(tm.group(1)) if tm else None, json.dumps(inst)))
+        self.db.executemany("INSERT OR REPLACE INTO runs VALUES(?,?,?,?)", runs)
+        self.log("runs", len(runs))
+        self.log("spawn tiers", len(tiers), "encounter templates", len(enc))
         self.log("spawnbehaviors", len(rows), "chest upgrades", len(up), "camps", len(camps))
 
     # ---------------------------------------------------------------- derived structures index

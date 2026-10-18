@@ -892,7 +892,7 @@ def calibration_offset():
 
 
 def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=None, min_hp=None, consumables_used=None, notes=None,
-                   runs=1, mastery=None, date=None, save=True):
+                   runs=1, mastery=None, clear_minutes=None, date=None, save=True):
     """Add a real fight outcome to the calibration journal; returns the model's raw margin for it and the new offset."""
     if isinstance(loadouts, (str, dict)):
         loadouts = [loadouts]
@@ -906,7 +906,7 @@ def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=No
            "stage": stage, "outcome": _norm_outcome(outcome), "loadouts": los,
            "ips": ips if isinstance(ips, list) or ips is None else str(ips),
            "intents": (intents if isinstance(intents, list) else str(intents).split("|")) if intents else None,
-           "runs": int(runs or 1), "mastery": mastery, "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
+           "runs": int(runs or 1), "mastery": mastery, "clear_minutes": clear_minutes, "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
     try:
         from . import patchnotes
         d_, t_ = patchnotes.current_patch()

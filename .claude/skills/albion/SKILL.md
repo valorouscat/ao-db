@@ -45,6 +45,10 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      `farm_plan` (where to farm: win/death chance vs the meta, expected re-gear loss/h, break-even silver/h). The public
      killboard covers open-world kills only — say it is a proxy for instanced content. Fights/hour are assumptions: ask the
      user for their real numbers and pass `encounters_per_hour` / `silver_per_hour`.
+   - Monster fights in detail: `encounter_sim` (corrupted dungeon maps, Mists camps / dungeon, hellgate PvE) and `camp_sim`
+     (Roads camps) fight every pull second by second → clear time, lowest HP (both dodge scenarios), failed pulls, elite risk,
+     fame/hour, hardest pull. Name the hardest pull and heavy hits in the answer; times are calibrated only if the journal has
+     `clear_minutes` — ask the user how long their clears take and record it.
    - **Real outcomes calibrate the model.** When the user reports how a run actually went (cleared easily / barely / died, lowest HP,
      consumables), call `record_outcome` (outcome: easy / doable / hard / failed; same loadout + IP as the check) and commit
      `knowledge/calibration.json`. gear_check/group_check then show calibrated margins with the raw value in brackets;
