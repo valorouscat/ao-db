@@ -225,6 +225,18 @@ def required_ip(p):
     return par + (100 * math.log(p["F"] / ref) / PER100 if ref and p["F"] else 0)
 
 
+BURST_GAP = 150  # focused player's raw armor IP this far below the content tier's gear IP → burst / one-shot risk
+
+
+def _verdict_capped(margin, armor_ip, tier):
+    """Verdict from the margin, capped when raw armor IP is far below the content tier (heals/kiting don't stop bursts)."""
+    v = _verdict(margin)
+    gap = 700 + 100 * (tier - 4) - armor_ip
+    if gap > BURST_GAP and margin >= -200:
+        return "🟠 burst risk: armor " + f"{gap:.0f} IP below tier"
+    return v
+
+
 def _verdict(margin):
     if margin >= 0:
         return "✅ comfortable"
@@ -249,6 +261,8 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
         want = {STAGE_NAMES.get(str(s).lower(), s) for s in stages}
     game_avg, slot_ips = loadout_ip(entries, spec_ip, weapon_ip, slot_ip, avg_ip)
     fight_ip = model_ip(slot_ips) or game_avg
+    _arm = [r[1] for r in slot_ips if r[0] in ("head", "armor", "shoes")]
+    armor_ip = sum(_arm) / len(_arm) if _arm else game_avg
     flags, spells = kit(entries)
     prof = content_profile(behaviour, tiers)
 
@@ -300,7 +314,8 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
         strongest = max(p["guards"], key=lambda g: g["hp"] * g["dps"]) if p["guards"] else None
         res.append((f"T{p['tier']}", ["small", "medium", "large"][p["stage"]] if p["stage"] < 3 else p["stage"], len(p["guards"]),
                     f"{sum(g['hp'] for g in p['guards']):,.0f}", f"{sum(g['dps'] for g in p['guards']):,.0f}",
-                    f"{strongest['name']} ({strongest['hp']:,.0f} HP)" if strongest else "", f"{need:.0f}", f"{margin:+.0f}", _verdict(margin)))
+                    f"{strongest['name']} ({strongest['hp']:,.0f} HP)" if strongest else "", f"{need:.0f}", f"{margin:+.0f}",
+                    _verdict_capped(margin, armor_ip, p["tier"])))
     o.append(table(res, ["roads tier", "chest", "guards", "total HP", "total raw DPS", "strongest guard", "model IP needed", "margin", "verdict"]))
     o.append(f"_Guard composition from `{prof[0]['template'] if prof else ''}`; guards upgrade together with the chest. "
              "Roads tier: T4 from blue/yellow zones, T6 from red/black, T8 deep roads (Paths to Glory, 2024-07-22)._")
@@ -328,7 +343,8 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
     o.append("\n_Model: base stage of a tier-T camp ≈ tuned for T.0 gear (IP 700 + 100·(T−4)); each larger chest stage needs extra IP "
              "= 100·ln(F_stage/F_base)/ln(1.192), F = HP×DPS of the hardest pull (boss slot or 3 strongest guards); "
              "+100 IP ≈ ×1.0918 damage (weapon) and ×1.0918 survivability (armor) (gamedata.json); model IP = mean of weapon and armor IP. Ignores player skill, spec, resistances, mechanics, "
-             "and PvP risk — use it to compare options, not as a guarantee._")
+             "and PvP risk — use it to compare options, not as a guarantee. Verdict capped at 🟠 when armor IP is >150 below the content "
+             "tier's gear IP (burst risk)._")
     return "\n".join(o)
 
 
@@ -336,7 +352,9 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
 # Role factors are model assumptions (documented in the output). Role detection uses itemroles.json (party context).
 ROLE_FACTORS = {  # damage share, survivability when focused
     "Tank": (0.6, 1.6), "DPS": (1.0, 1.0), "Ranged_DPS": (1.0, 1.0), "Support": (0.6, 1.0), "Heal": (0.3, 1.0),
+    "Hybrid_Heal": (0.8, 1.0),  # healing weapon with damage spells on Q/W: mostly damage, light group healing
 }
+HYBRID_HEAL_BONUS = 0.4
 HEAL_BONUS = (0.8, 0.4)        # focused target survivability +80% from the 1st healer, +40% from the 2nd
 SUPPORT_DMG = 0.15             # arcane-style support: +15% group damage each
 SPREAD_BONUS = 0.25            # no tank: aggro can be swapped/kited, +25% per extra player
@@ -359,6 +377,17 @@ def detect_role(entries):
             continue
         score[role] = 2 * cats.get(weapon["sub1"] if weapon else "", 0) + cats.get(armor["sub1"] if armor else "", 0)
     role = max(score, key=score.get) if score and max(score.values()) > 0 else "DPS"
+    if role == "Heal":  # damage-specced healer weapon (e.g. druid with damage Q/W) → hybrid
+        dmg_spells = 0
+        for e in entries:
+            if e["row"]["slot"] != "mainhand":
+                continue
+            for sid in e["active"][:2]:
+                sp = q1("SELECT category, desc_en FROM spells WHERE id=?", sid)
+                if sp and sp["category"] != "heal" and re.search(r"damage", sp["desc_en"] or "", re.I):
+                    dmg_spells += 1
+        if dmg_spells >= 2:
+            role = "Hybrid_Heal"
     return role, score
 
 
@@ -440,6 +469,7 @@ def group_check(loadouts, content="avalon_veteran", ips=None, tiers=None, stages
     surv = 1.0918 ** ((focus["armor"] - 1000) / 100) * ROLE_FACTORS.get(focus["role"], (1, 1))[1]
     healers = [p for p in players if p["role"] == "Heal"]
     surv *= 1 + sum(HEAL_BONUS[i] if i < len(HEAL_BONUS) else 0.2 for i in range(len(healers)))
+    surv *= 1 + HYBRID_HEAL_BONUS * min(1, sum(1 for p in players if p["role"] == "Hybrid_Heal" and p is not focus))
     if not tanks:
         surv *= 1 + SPREAD_BONUS * (len(players) - 1)
     balance = dmg * surv
@@ -453,8 +483,10 @@ def group_check(loadouts, content="avalon_veteran", ips=None, tiers=None, stages
     comp = []
     if not tanks:
         comp.append("no tank: mobs hit whoever has aggro — kite and swap aggro (modelled as +25% survivability per extra player)")
-    if not healers:
+    if not healers and not any(p["role"] == "Hybrid_Heal" for p in players):
         comp.append("no healer: sustain only from lifesteal/self-heals and potions")
+    elif not healers:
+        comp.append("only a damage-specced healer: light group healing (modelled as +40% survivability for the focused ally)")
     if not any(p["flags"]["AoE"] for p in players):
         comp.append("no AoE in the group")
     cc = sum(len(p["flags"]["crowd control"]) for p in players)
@@ -473,7 +505,8 @@ def group_check(loadouts, content="avalon_veteran", ips=None, tiers=None, stages
         margin = group_ip - need
         strongest = max(p["guards"], key=lambda g: g["hp"] * g["dps"]) if p["guards"] else None
         res.append((f"T{p['tier']}", ["small", "medium", "large"][min(p["stage"], 2)], len(p["guards"]), f"{sum(g['hp'] for g in p['guards']):,.0f}",
-                    f"{strongest['name']} ({strongest['hp']:,.0f} HP)" if strongest else "", f"{need:.0f}", f"{margin:+.0f}", _verdict(margin)))
+                    f"{strongest['name']} ({strongest['hp']:,.0f} HP)" if strongest else "", f"{need:.0f}", f"{margin:+.0f}",
+                    _verdict_capped(margin, focus["armor"], p["tier"])))
     o.append(f"\n### Content strength — `{behaviour}`\n" +
              table(res, ["roads tier", "chest", "guards", "total HP", "strongest guard", "model IP needed", "margin", "verdict"]))
     if not intent[0] <= len(players) <= intent[1]:
@@ -498,7 +531,8 @@ def group_check(loadouts, content="avalon_veteran", ips=None, tiers=None, stages
         o.append("\n### Risk (full loot)\nRe-gear per player (normal-quality prices, " + city + "): " + "; ".join(lines) +
                  (f" — group total ≈ **{money(total)}**" if total else ""))
     o.append("\n_Group model: damage = Σ role share × 1.0918^((weapon IP−1000)/100) (DPS 1.0, support 0.6 +15% group dmg, tank 0.6, "
-             "healer 0.3); survivability of the focused target = 1.0918^((armor IP−1000)/100) × (tank 1.6) × (1 + 0.8 first healer "
+             "healer 0.3, damage-specced healer 0.8 + 40% heal on an ally); survivability of the focused target = 1.0918^((armor IP−1000)/100) × (tank 1.6) × (1 + 0.8 first healer "
              "+ 0.4 second) × (no tank: 1 + 0.25 per extra player). Group IP = 1000 + 100·ln(damage×survivability)/ln(1.192), "
-             "compared with the camp model of gear_check. Role factors are assumptions; coordination, mechanics and PvP are not modelled._")
+             "compared with the camp model of gear_check. Verdict capped at 🟠 when the focused player's raw armor IP is >150 below the "
+             "content tier's gear IP (burst risk). Role factors are assumptions; coordination, mechanics and PvP are not modelled._")
     return "\n".join(o)
