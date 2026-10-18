@@ -122,6 +122,32 @@ class SpellWalk:
 
 
 @functools.lru_cache(maxsize=None)
+def _is_player_spell(sid):
+    return bool(q1("SELECT 1 FROM item_spells WHERE spell_id=? LIMIT 1", sid))
+
+
+FANOUT = 15  # a single cast never legitimately touches more distinct spells than this (player kits: ≤13)
+_typical_busy = False
+
+
+@functools.lru_cache(maxsize=None)
+def typical_cast(vs="mobs"):
+    """Median per-cast damage of reliable damaging player spells — stand-in for copy/random spells."""
+    global _typical_busy
+    _typical_busy = True
+    try:
+        vals = []
+        for r in q("SELECT DISTINCT s.spell_id FROM item_spells s JOIN spells sp ON sp.id=s.spell_id WHERE sp.category='damage'"):
+            p = spell_profile(r["spell_id"], vs)
+            if p and not p["unreliable"] and p["dmg"] > 0:
+                vals.append(p["dmg"])
+        return statistics.median(vals) if vals else 0.0
+    finally:
+        _typical_busy = False
+        spell_profile.cache_clear()  # entries computed meanwhile hold 0 for unreliable spells
+
+
+@functools.lru_cache(maxsize=None)
 def spell_profile(sid, vs="mobs"):
     """{'dmg': per-cast damage, 'cycle': seconds, 'aoe': bool, 'targets': cap, 'types': {physical/magic: share}}"""
     d = spell_json(sid)
@@ -129,8 +155,11 @@ def spell_profile(sid, vs="mobs"):
         return None
     w = SpellWalk(vs)
     raw = w.walk(d, 1.0, 0)
-    unreliable = raw >= MAX_CAST_DAMAGE  # runaway nested copy/chain multipliers: don't trust the number
-    dmg = 0.0 if unreliable else raw
+    # runaway nested copy/chain multipliers, or a copy/random spell that references dozens of other spells (Mimic, Wild Magic):
+    # don't trust the number — count it as a typical player spell
+    fanout = len(w.seen) > FANOUT and _is_player_spell(sid)
+    unreliable = raw >= MAX_CAST_DAMAGE or fanout
+    dmg = typical_cast(vs) if fanout and not _typical_busy else (0.0 if unreliable else raw)
     cd = num(d.get("@recastdelay")) or 0
     stages, cur, guard = 0, d, 0
     while cur and guard < 6:  # combo / recast chains: each extra press takes ~0.8 s
@@ -144,6 +173,8 @@ def spell_profile(sid, vs="mobs"):
         stages += 1
         cur, guard = spell_json(nxt), guard + 1
     cycle = max(cd, GCD) + (num(d.get("@castingtime")) or 0) + 0.8 * stages
+    if fanout:
+        cycle = max(cycle, 10.0)
     if d.get("@target") == "ground" and not w.aoe and re.search(r"area|cone|radius", json.dumps(d)[:4000], re.I):
         w.aoe = True
     if not w.aoe:  # e.g. Explosive Arrows: the effect is applied to auto-attacks but explodes in an area

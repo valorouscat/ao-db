@@ -177,8 +177,8 @@ def pvp_spell(sid):
     p = combat.spell_profile(sid, "players") or {"dmg": 0.0, "cycle": core.num(d.get("@recastdelay")) or 1.0, "aoe": False, "types": {}}
     dfn = combat.spell_defense(sid) or {}
     cycle = max(p["cycle"] or 1.0, combat.GCD)
-    out = dict(w.v)
-    out.update(dmg=0.0 if p.get("unreliable") else p["dmg"], cycle=cycle, aoe=p["aoe"], types=p.get("types") or {},
+    out = {} if len(w.seen) > combat.FANOUT else dict(w.v)  # copy/random spells: effects of every copied spell are not ours
+    out.update(dmg=p["dmg"], cycle=cycle, aoe=p["aoe"], types=p.get("types") or {},
                shield=dfn.get("shield_ps", 0) * cycle, heal=dfn.get("heal_self_ps", 0) * cycle, lifesteal=dfn.get("lifesteal", 0))
     return out
 

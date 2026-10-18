@@ -288,6 +288,13 @@ class PvP(unittest.TestCase):
         self.assertIn("lost (effective", t)
         self.assertIn("Matchups", t)
 
+    def test_copy_spells_are_not_summed(self):
+        from aodb import combat
+        mimic = pvp.pvp_spell("MIMIC")                                # copies the enemy's last spell: refs dozens of spells
+        self.assertLess(mimic["dmg"], 400)
+        self.assertFalse(mimic.get("cc_hard"))
+        self.assertTrue(combat.spell_profile("MIMIC", "players")["unreliable"])
+
     def test_cap_variants(self):
         c = pvp.ip_variants(["T6_HEAD_LEATHER_SET2@1"], 1000)["T6_HEAD_LEATHER_SET2@1"]
         self.assertIn("T4_HEAD_LEATHER_SET2@3", c)
