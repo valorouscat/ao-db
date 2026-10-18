@@ -95,6 +95,7 @@ TOOLS = [
                      avg_ip=P(I, "Character's average IP from the game; slots without explicit IP share the difference equally"),
                      intents=P(S, "How Q/W/E are set up when the loadout lacks spells or the user described them: 'q=damage,w=damage' "
                                   "or free text like 'Q W на урон'"),
+                     hp=P(N, "Character max health from the game (replaces the estimate: 1200 base + items)"),
                      dodge=P(N, "Share of telegraphed (ground/area) mob ability damage dodged", 0.9),
                      dodge_low=P(N, "Pessimistic dodge share shown as a second scenario", 0.5), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
                      city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True))),
@@ -105,7 +106,7 @@ TOOLS = [
               "(itemroles.json), coordination penalty. Shows hardest pull, mechanics to dodge, loot per player, re-gear risk.",
          params=dict(loadouts=P(A, "One loadout JSON (or @file) per player", required=True),
                      content=P(S, "avalon_veteran (blue, default), avalon_solo (green), avalon_elite (gold)", "avalon_veteran"),
-                     ips=P(S, "In-game IP per player, players separated by '|': 'avg=1250,mainhand=1300 | avg=1180 | head=1200'"),
+                     ips=P(S, "In-game IP (and optionally max health) per player, separated by '|': 'avg=1250,mainhand=1300,hp=2400 | avg=1180'"),
                      intents=P(S, "Spell intents per player separated by '|': 'q=damage,w=damage | ' (missing spells are auto-picked: "
                                   "damage, or heal for healer weapons)"),
                      dodge=P(N, "Share of telegraphed (ground/area) mob ability damage dodged", 0.9),

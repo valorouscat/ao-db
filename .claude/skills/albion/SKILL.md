@@ -56,7 +56,9 @@ Any "can I/we do X" answer is built on the actual mobs of that content (gear_che
 guards per chest stage → each mob's HP, auto-attack + ability DPS, armor/mres, pulls by position, all template variants).
 In the answer, name the hardest pull (which mobs) and the telegraphed mechanics. Always report both dodge scenarios
 (default 90% of telegraphed ground/area abilities, pessimistic 50%) and the "caught heavy hit" check (one-shot or % HP);
-player defenses (shields, heals, lifesteal, CC, invulnerability, kiting) are credited from their actual spells. Never estimate only from "intended group size".
+player defenses (shields, heals, lifesteal, CC, invulnerability, kiting) are credited from their actual spells.
+Player stats come from their items (armor/mres/CC res/flat HP/damage & heal bonuses, scaled per slot by ItemPowerProgression);
+max health = 1200 base + gear. If the user gives the in-game HP, pass it (`hp` / `ips "…,hp=2400"`). Never estimate only from "intended group size".
 When the user describes spells in words ("Q W на урон", "хил на E"), pass that as `intents`; the tool picks the matching
 spells per slot and shows them (marked *) — confirm the pick in the answer.
 

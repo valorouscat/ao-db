@@ -118,7 +118,8 @@ class GearCheck(unittest.TestCase):
         med = lambda st: sorted(e["F"] for e in st["evals"])[len(st["evals"]) // 2]
         self.assertLess(med(ev[0]), med(ev[2]))                       # guards upgrade with the chest
         self.assertTrue(all(5 <= e["guards"] <= 20 for e in ev[0]["evals"]))  # one camp per chest, not the whole template
-        self.assertAlmostEqual(gearcheck.needed_ip(gearcheck.anchor_F(6), 6), 900, places=6)
+        self.assertAlmostEqual(gearcheck.needed_ip(gearcheck.anchor_F(6), 6), gearcheck.par_ip(6), places=6)
+        self.assertLess(gearcheck.par_ip(4), gearcheck.par_ip(6))
         t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
         self.assertIn("Invisibility Potion", t)
         self.assertIn("Hardest pull", t)
@@ -142,6 +143,14 @@ class GearCheck(unittest.TestCase):
         self.assertGreater(combat.spell_defense("ENERGY_BARRIER")["shield_ps"], 0)
         self.assertGreater(combat.spell_defense("CIRCLEOFLIFE")["heal_ally_ps"], 0)
         self.assertGreater(combat.spell_defense("FOOD_BUFF_LIFESTEAL_P5")["lifesteal"], 0)
+
+    def test_player_stats_from_items(self):
+        _, e = gearcheck.parse_loadout(json.dumps(LOADOUT))
+        _, rows = gearcheck.loadout_ip(e)
+        st = gearcheck.player_stats(e, rows)
+        self.assertGreater(st["hp"], 1200)                       # base 1200 + gear
+        self.assertGreater(st["physicalarmor"], 108)             # mercenary jacket 108 at 700 IP, scaled up
+        self.assertEqual(gearcheck.player_stats(e, rows, 2500)["hp"], 2500)  # in-game value overrides
 
     def test_intents(self):
         self.assertEqual(gearcheck.parse_intents("Q W на урон"), {"1": "damage", "2": "damage"})

@@ -48,7 +48,10 @@ DODGE = 0.9          # default: share of telegraphed (ground/area, wind-up) abil
 DODGE_LOW = 0.5      # pessimistic scenario
 KITE = 0.5           # ranged player vs melee mobs: share of melee auto-attack damage still taken
 DEF_BASELINE = 1.3   # defense multiplier of a "typical" kit at par (anchor assumption)
-BASE_HP = 1800       # player max HP at 1000 armor IP (leather) — assumed; ×1.06 per +100 IP, plate ×1.15, cloth ×0.9
+BASE_HP = 1200       # character base max health (no gear)
+ARMOR_HP_1000 = 600  # ASSUMED total max-health bonus of head+armor+shoes at 1000 IP (split by gamedata hitpointsshare
+                     # head .25 / armor .5 / shoes .25, ×1.06 per +100 IP); the absolute value is not in the dump —
+                     # pass the in-game HP (hp=...) for exact numbers
 SUSTAIN_FLOOR = 0.35 # incoming damage after defenses never drops below 35% of raw (defense multiplier ≤ ×2.9)
 CC_CAP_SPELL = 0.25  # one spell keeps the pull disabled at most 25% of the time
 CC_CAP_GROUP = 0.35
@@ -242,6 +245,8 @@ def _parse_ips(ips, n):
             k, v = part.split("=", 1)
             if k.strip().lower() in ("avg", "average", "avg_ip", "средний"):
                 out[i]["avg_ip"] = float(v)
+            elif k.strip().lower() in ("hp", "health", "здоровье", "хп"):
+                out[i]["hp"] = float(v)
             else:
                 slots[k] = v
         if slots:
@@ -398,9 +403,16 @@ def anchor_F(tier):
     return _anchor[tier]
 
 
+def par_ip(tier):
+    """Model IP of a tier-T .0 character (median weapon, reference leather set at the tier's IP)."""
+    ip = 700 + 100 * (tier - 4)
+    power = 1.0918 ** ((ip - 1000) / 100) * reference_ehp(ip) / reference_ehp()
+    return 1000 + 100 * math.log(power) / PER100
+
+
 def needed_ip(F, tier):
     ref = anchor_F(tier)
-    return 700 + 100 * (tier - 4) + (100 * math.log(F / ref) / PER100 if ref and F else 0)
+    return par_ip(tier) + (100 * math.log(F / ref) / PER100 if ref and F else 0)
 
 
 def _verdict(margin):
@@ -421,6 +433,72 @@ def _verdict_capped(margin, armor_ip, tier):
 
 
 # ------------------------------------------------------------------ players
+REF_DMG_BONUS = 0.2  # damage bonus of the reference set (T4 mercenary jacket: +20% spell and attack damage)
+STAT_REF_IP = 700  # item stat values in items.json are taken as the values at 700 IP (T4.0) — assumption
+STAT_PROGRESSION = {"physicalarmor": "armorprogression", "magicresistance": "armorprogression",
+                    "crowdcontrolresistance": "crowdcontrolresistanceprogression", "hitpointsmax": "hitpointsprogression",
+                    "energymax": "energyprogression"}
+PCT_STATS = ("bonusdefensevsmobs", "physicalspelldamagebonus", "magicspelldamagebonus", "physicalattackdamagebonus",
+             "magicattackdamagebonus", "healbonus", "healmodifier", "threatbonus")
+_prog = None
+
+
+def progression():
+    global _prog
+    if _prog is None:
+        r = q1("SELECT v FROM meta WHERE k='itempowerprogression'")
+        _prog = json.loads(r["v"]) if r else {}
+    return _prog
+
+
+def player_stats(entries, rows, given_hp=None):
+    """Character stats from the equipped items: each item stat scaled by its slot's ItemPowerProgression for that item's IP
+    (incl. quality and mastery). HP = 1200 base + head/armor/shoes share bonus + items' flat max health."""
+    pr = progression().get("ItemPowerProgression", {})
+    shares = {k.lstrip("@"): combat.num(v) or 0 for k, v in (pr.get("hitpointsshare") or {}).items()}
+    ips = {r[0]: r[1] for r in rows}
+    st = {"physicalarmor": 0.0, "magicresistance": 0.0, "crowdcontrolresistance": 0.0, "hitpointsmax": 0.0, "energymax": 0.0}
+    st.update({k: 0.0 for k in PCT_STATS})
+    for e in entries:
+        sl = e["row"]["slot"]
+        if e["inventory"] or sl not in ips:
+            continue
+        d = core.item_json(e["id"])
+        key = ("mainhand_2h" if d.get("@twohanded") == "true" else "mainhand_1h") if sl == "mainhand" else sl
+        prog = {k.lstrip("@"): v for k, v in (pr.get(key) or {}).items()}
+        steps = (ips[sl] - STAT_REF_IP) / 100
+        for stat, pkey in STAT_PROGRESSION.items():
+            v = combat.num(d.get("@" + stat)) or 0
+            if v:
+                st[stat] += v * (combat.num(prog.get(pkey)) or 1) ** steps
+        for stat in PCT_STATS:
+            v = combat.num(d.get("@" + stat)) or 0
+            if v:
+                st[stat] += v * (combat.num(prog.get(stat)) or 1) ** steps
+    armor_hp = sum(shares.get(slot, 0) * ARMOR_HP_1000 * 1.06 ** ((ips[slot] - 1000) / 100) for slot in ("head", "armor", "shoes") if slot in ips)
+    hp = BASE_HP + armor_hp + st["hitpointsmax"]
+    st["hp"] = float(given_hp) if given_hp else hp
+    st["hp_source"] = "in-game value" if given_hp else f"1200 base + {armor_hp:,.0f} armor share + {st['hitpointsmax']:,.0f} items"
+    return st
+
+
+def ehp(st):
+    """Effective HP vs mobs: HP / damage taken multiplier (avg of physical/magic mitigation, defense vs mobs)."""
+    mit = (combat.mitigation(st["physicalarmor"]) + combat.mitigation(st["magicresistance"])) / 2
+    return st["hp"] / (mit * max(1 - min(st["bonusdefensevsmobs"], 0.6), 0.4))
+
+
+_ref_ehp = None
+
+
+def reference_ehp(ip=1000):
+    """EHP of a reference character: T4 mercenary leather set (hood/jacket/shoes) + broadsword, every slot at `ip`."""
+    ids = ["T4_MAIN_SWORD", "T4_HEAD_LEATHER_SET1", "T4_ARMOR_LEATHER_SET1", "T4_SHOES_LEATHER_SET1"]
+    ents = [{"id": i, "row": q1("SELECT * FROM items WHERE id=?", i), "inventory": False} for i in ids]
+    rows = [(e["row"]["slot"], ip, 1, "ref") for e in ents]
+    return ehp(player_stats(ents, rows))
+
+
 def build_player(lo, ip_spec=None, intents=None):
     name, entries = parse_loadout(lo)
     raw = _raw_loadout(lo)
@@ -437,6 +515,10 @@ def build_player(lo, ip_spec=None, intents=None):
     role, _ = detect_role(entries)
     flags, _ = kit(entries)
     wf, mix, parts = (combat.weapon_factor(weapon_e["id"], weapon_e["active"]) if weapon_e else (1.0, NEUTRAL_MIX, []))
+    _st = player_stats(entries, rows)
+    bonus = mix.get("physical", 0) * (_st["physicalspelldamagebonus"] + _st["physicalattackdamagebonus"]) / 2 \
+        + mix.get("magic", 0) * (_st["magicspelldamagebonus"] + _st["magicattackdamagebonus"]) / 2
+    wf *= (1 + bonus) / (1 + REF_DMG_BONUS)  # item damage bonuses, relative to the reference leather jacket
     kit_base = combat.kit_dps(weapon_e["id"], weapon_e["active"])[0] if weapon_e else combat.reference_kit_dps(3)
     dfn = {"shield_ps": 0.0, "heal_self_ps": 0.0, "heal_ally_ps": 0.0, "heal_pct_ps": 0.0, "lifesteal": 0.0, "cc": [], "invuln_frac": 0.0,
            "sources": []}
@@ -464,15 +546,15 @@ def build_player(lo, ip_spec=None, intents=None):
                 nm = q1("SELECT name_en FROM spells WHERE id=?", sid)
                 dfn["sources"].append((nm["name_en"] if nm else sid) or sid)
     chest = next((e for e in entries if e["row"]["slot"] == "armor" and not e["inventory"]), None)
-    chest_kind = chest["row"]["sub1"] if chest else ""
-    hp = BASE_HP * 1.06 ** ((armor_ip - 1000) / 100) * {"plate_armor": 1.15, "cloth_armor": 0.9}.get(chest_kind, 1.0)
-    res = (combat.num(core.item_json(chest["id"]).get("@physicalarmor")) or 0) if chest else 0
-    res *= 1.03 ** ((armor_ip - 1000) / 100)
+    stats = player_stats(entries, rows, ip_spec.get("hp") or raw.get("hp"))
+    hp, hp_parts = stats["hp"], stats["hp_source"]
+    res = (stats["physicalarmor"] + stats["magicresistance"]) / 2
     ranged = bool(weapon_e) and (combat.num(core.item_json(weapon_e["id"]).get("@attackrange")) or 3) >= 8
     ap = ((combat.num(core.item_json(weapon_e["id"]).get("@abilitypower")) or 100) / 100) if weapon_e else 1.0
     return {"name": name, "entries": entries, "rows": rows, "avg": game_avg, "weapon": weapon_ip, "armor": armor_ip, "role": role,
             "flags": flags, "wf": wf, "mix": mix, "parts": parts, "weapon_e": weapon_e, "explicit": bool(avg_ip or slot_ip or ip_spec),
-            "def": dfn, "hp": hp, "res": res, "ranged": ranged, "kit_base": kit_base, "ap": ap}
+            "def": dfn, "hp": hp, "hp_parts": hp_parts, "res": res, "ranged": ranged, "kit_base": kit_base, "ap": ap, "stats": stats,
+            "ehp_factor": ehp(stats) / reference_ehp()}
 
 
 def group_power(players):
@@ -485,7 +567,7 @@ def group_power(players):
     focus = (max(tanks, key=lambda p: p["armor"]) if tanks else
              max(melee or [p for p in players if p["role"] != "Heal"] or players,
                  key=lambda p: ROLE_FACTORS.get(p["role"], (1, 1))[0] * p["wf"] * 1.0918 ** ((p["weapon"] - 1000) / 100)))
-    surv = 1.0918 ** ((focus["armor"] - 1000) / 100) * ROLE_FACTORS.get(focus["role"], (1, 1))[1]
+    surv = focus["ehp_factor"] * ROLE_FACTORS.get(focus["role"], (1, 1))[1]  # EHP from the focus's item stats vs a 1000-IP reference
     healers = [p for p in players if p["role"] == "Heal"]  # healing itself comes from their spells (defense model)
     if not tanks and len(players) > 1:
         surv *= 1 + SPREAD_BONUS * (len(players) - 1)
@@ -508,7 +590,7 @@ def defense_multiplier(players, focus, ev, dodge):
     d = focus["def"]
     sustain = (d["shield_ps"] + d["heal_self_ps"]) * ipf(focus) + d["heal_pct_ps"] * focus["hp"]
     sustain += d["lifesteal"] * focus["kit_base"] * ipf(focus) * combat.mitigation(ev["res"]) * 3.34 * 0.3
-    sustain += sum(p["def"]["heal_ally_ps"] * ipf(p) for p in players)  # ally heals (incl. the focus's own AoE heals)
+    sustain += sum(p["def"]["heal_ally_ps"] * ipf(p) * (1 + p["stats"]["healbonus"]) for p in players)  # ally heals (+ item heal bonus)
     net = max(raw * (1 - cc) * (1 - min(d["invuln_frac"], 0.3)) - sustain, SUSTAIN_FLOOR * raw)
     return raw / net if net else 1.0, cc, sustain
 
@@ -586,9 +668,10 @@ def _player_table(players):
         rows.append((i + 1, p["name"], p["role"].replace("_", " "), f"{p['avg']:.0f}", f"{p['weapon']:.0f}", f"{p['armor']:.0f}",
                      label(w["id"]) if w else "", "; ".join(sp), f"{p['wf']:.2f}",
                      " / ".join(f"{k} {v:.0%}" for k, v in sorted(p["mix"].items(), key=lambda kv: -kv[1]) if v >= 0.05),
-                     f"{p['hp']:,.0f}", dtxt))
+                     f"{p['hp']:,.0f} / {p['stats']['physicalarmor']:.0f} / {p['stats']['magicresistance']:.0f}"
+                     + (f" / def vs mobs {p['stats']['bonusdefensevsmobs']:.0%}" if p['stats']['bonusdefensevsmobs'] else ""), dtxt))
     return table(rows, ["#", "loadout", "role", "avg IP", "weapon IP", "armor IP", "weapon", "Q/W/E (*auto-picked)", "weapon factor",
-                        "damage type", "HP (est.)", "defenses (base values)"])
+                        "damage type", "HP / armor / magic res (from items)", "defenses (base values)"])
 
 
 MODEL_NOTE = ("_Dodging: telegraphed mob abilities (ground/area with wind-up) are avoided at the given rate (default 90%, pessimistic "
@@ -606,14 +689,14 @@ MODEL_NOTE = ("_Dodging: telegraphed mob abilities (ground/area with wind-up) ar
 
 # ------------------------------------------------------------------ tools
 def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, weapon_ip=None, slot_ip=None, avg_ip=None,
-               intents=None, dodge=DODGE, dodge_low=DODGE_LOW, server="europe", city="Caerleon", price=True):
+               intents=None, hp=None, dodge=DODGE, dodge_low=DODGE_LOW, server="europe", city="Caerleon", price=True):
     key = content if content in CONTENT else next((v for a, v in ALIASES.items() if a in (content or "").lower()), None)
     if not key:
         raise AOError(f"Unknown content {content!r}. Supported: {', '.join(CONTENT)} (aliases: green/blue/gold).")
     behaviour, title, default_tiers, _ = CONTENT[key]
     tiers = [int(t) for t in (tiers or default_tiers)]
     want = {STAGE_NAMES.get(str(s).lower(), s) for s in stages} if stages else None
-    p = build_player(loadout, {"spec_ip": spec_ip, "weapon_ip": weapon_ip, "slot_ip": slot_ip, "avg_ip": avg_ip}, intents)
+    p = build_player(loadout, {"spec_ip": spec_ip, "weapon_ip": weapon_ip, "slot_ip": slot_ip, "avg_ip": avg_ip, "hp": hp}, intents)
     gp = group_power([p])
     o = [f"## Gear check: “{p['name']}” → {title}", "", _player_table([p])]
     rows = []

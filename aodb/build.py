@@ -504,6 +504,8 @@ class Builder:
         self.build_camps()
         self.build_clusters()
         self.build_docs()
+        g = load(self.repo, "gamedata.json")["AO-GameData"]["Items"]
+        self.db.execute("INSERT INTO meta VALUES(?,?)", ("itempowerprogression", json.dumps(g, ensure_ascii=False)))
         rev = os.popen(f"git -C '{self.repo}' log -1 --format='%h %cs %s' 2>/dev/null").read().strip()
         self.db.executemany("INSERT INTO meta VALUES(?,?)", [("built", time.strftime("%Y-%m-%d %H:%M")), ("repo_rev", rev)])
         self.db.commit()
