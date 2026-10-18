@@ -34,7 +34,8 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
    - Community knowledge: `notes <query>` first, then WebSearch (2+ sources, prefer the current patch and year,
      check dates; patch notes beat guides). Mark anything older than the latest major update as possibly outdated.
    - Player's own gear (loadout JSON pasted from the game): `gear_check` → IP, kit, camp strength per tier/stage, verdict, re-gear cost.
-     Ask for the weapon IP shown in game (incl. mastery) → `weapon_ip`; present the verdict as a model estimate.
+     Ask for in-game IP incl. mastery: per slot → `slot_ip` (or `weapon_ip`), character average → `avg_ip` (unspecified slots share
+     the difference equally). Present the verdict as a model estimate.
 3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
    (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
    comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.

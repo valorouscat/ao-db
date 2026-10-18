@@ -50,39 +50,76 @@ def parse_loadout(loadout):
         iid = resolve_item(e["item"])
         it = q1("SELECT * FROM items WHERE id=?", iid)
         entries.append({"id": iid, "row": it, "quality": int(e.get("quality") or 1), "stack": int(e.get("stack") or 1),
+                        "ip": e.get("ip") or e.get("itemPower"),
                         "active": e.get("activeSpells") or [], "passive": e.get("passiveSpells") or [], "inventory": bool(e.get("_inventory"))})
     if not entries:
         raise AOError("Loadout has no equipment")
     return loadout.get("name") or "loadout", entries
 
 
-def loadout_ip(entries, spec_ip=0, weapon_ip=None):
-    """Average IP of combat slots; weapon_ip = in-game weapon IP incl. mastery (replaces the computed main-hand value)."""
-    total, n, rows = 0.0, 0, []
+def parse_slot_ip(slot_ip):
+    """{'mainhand': 1300, 'head': 1150} from a dict, 'mainhand=1300,head=1150' or ['mainhand=1300', ...]."""
+    if not slot_ip:
+        return {}
+    if isinstance(slot_ip, dict):
+        items = slot_ip.items()
+    else:
+        parts = slot_ip if isinstance(slot_ip, list) else re.split(r"[,;\s]+", slot_ip)
+        items = [p.split("=", 1) for p in parts if "=" in p]
+    aliases = {"weapon": "mainhand", "оружие": "mainhand", "helmet": "head", "шлем": "head", "chest": "armor", "куртка": "armor",
+               "броня": "armor", "boots": "shoes", "ботинки": "shoes", "плащ": "cape", "offhand": "offhand", "левая": "offhand"}
+    out = {}
+    for k, v in items:
+        k = aliases.get(str(k).strip().lower(), str(k).strip().lower())
+        if k not in COMBAT_SLOTS:
+            raise AOError(f"Unknown slot {k!r}; use {', '.join(COMBAT_SLOTS)}")
+        out[k] = float(v)
+    return out
+
+
+def loadout_ip(entries, spec_ip=0, weapon_ip=None, slot_ip=None, avg_ip=None):
+    """Per-slot IP of combat items and the game's average (6 slots, 2H weapon counted twice).
+
+    Priority per slot: slot_ip / weapon_ip (in-game values incl. mastery) > 'ip' field in the loadout entry > computed
+    (item IP + quality). If avg_ip (the character's in-game average) is given, slots without an explicit value get an equal
+    bonus so that the average matches it. spec_ip adds a flat bonus to every slot that has no explicit value."""
+    fixed = parse_slot_ip(slot_ip)
+    if weapon_ip:
+        fixed.setdefault("mainhand", float(weapon_ip))
+    rows = []  # [slot, ip, weight, source]
     for e in entries:
         it, slot = e["row"], e["row"]["slot"]
         if e["inventory"] or slot not in COMBAT_SLOTS or not it["itempower"]:
             continue
-        ip = it["itempower"] + QUALITY_IP.get(e["quality"], 0)
-        if slot == "mainhand" and weapon_ip:
-            ip = weapon_ip
         w = 2 if slot == "mainhand" and core.item_json(e["id"]).get("@twohanded") == "true" else 1
-        total += ip * w
-        n += w
-        rows.append((slot, ip, w))
-    if not n:
+        if slot in fixed:
+            rows.append([slot, fixed[slot], w, "given"])
+        elif e.get("ip"):
+            rows.append([slot, float(e["ip"]), w, "loadout"])
+        else:
+            rows.append([slot, it["itempower"] + QUALITY_IP.get(e["quality"], 0) + spec_ip, w, "item+quality" + (" +spec" if spec_ip else "")])
+    if not rows:
         raise AOError("No combat items (weapon/armor/cape) in the loadout")
-    return total / n + spec_ip, rows
+    n = sum(r[2] for r in rows)
+    if avg_ip:
+        free = [r for r in rows if r[3] not in ("given", "loadout")]
+        if free:
+            bonus = (avg_ip * n - sum(r[1] * r[2] for r in rows)) / sum(r[2] for r in free)
+            for r in free:
+                r[1] += bonus
+                r[3] = f"distributed ({bonus:+.0f})"
+    rows = [tuple(r) for r in rows]
+    return sum(r[1] * r[2] for r in rows) / n, rows
 
 
 def model_ip(rows, spec_ip=0):
     """IP the fight model uses: damage scales with the weapon (main/off hand), survivability with head/armor/shoes,
     so the balance point is the mean of the two (both progress ×1.0918 per 100 IP in gamedata.json)."""
-    off = [ip for slot, ip, _ in rows if slot in ("mainhand", "offhand")]
-    deff = [ip for slot, ip, _ in rows if slot in ("head", "armor", "shoes")]
+    off = [r[1] for r in rows if r[0] in ("mainhand", "offhand")]
+    deff = [r[1] for r in rows if r[0] in ("head", "armor", "shoes")]
     if not off or not deff:
         return None
-    return (sum(off) / len(off) + sum(deff) / len(deff)) / 2 + spec_ip
+    return (sum(off) / len(off) + sum(deff) / len(deff)) / 2
 
 
 def kit(entries):
@@ -181,7 +218,8 @@ def _verdict(margin):
 
 
 # ------------------------------------------------------------------ tool
-def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, weapon_ip=None, server="europe", city="Caerleon", price=True):
+def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, weapon_ip=None, slot_ip=None, avg_ip=None,
+               server="europe", city="Caerleon", price=True):
     name, entries = parse_loadout(loadout)
     key = content if content in CONTENT else next((v for a, v in ALIASES.items() if a in (content or "").lower()), None)
     if not key:
@@ -191,8 +229,8 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
     want = None
     if stages:
         want = {STAGE_NAMES.get(str(s).lower(), s) for s in stages}
-    avg_ip, slot_ips = loadout_ip(entries, spec_ip, weapon_ip)
-    fight_ip = model_ip(slot_ips, spec_ip) or avg_ip
+    game_avg, slot_ips = loadout_ip(entries, spec_ip, weapon_ip, slot_ip, avg_ip)
+    fight_ip = model_ip(slot_ips) or game_avg
     flags, spells = kit(entries)
     prof = content_profile(behaviour, tiers)
 
@@ -205,10 +243,12 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
                      core.QUALITY_NAMES.get(e["quality"], e["quality"]), (it["itempower"] or 0) + QUALITY_IP.get(e["quality"], 0) if it["itempower"] else "",
                      ", ".join(e["active"] + e["passive"]) + (f" ×{e['stack']}" if e["stack"] > 1 else "") + (" (bag)" if e["inventory"] else "")))
     o.append(table(rows, ["slot", "item", "quality", "IP", "spells / stack"]))
-    o.append(f"\n**Average item power: {avg_ip - spec_ip:.0f}**" + (f" (weapon at {weapon_ip} incl. mastery)" if weapon_ip else "") +
-             (f" + spec {spec_ip} = **{avg_ip:.0f}**" if spec_ip else
-              "" if weapon_ip else " (without mastery/spec: pass weapon_ip from the game, or spec_ip, e.g. 100–300)") +
-             f"\nModel IP (mean of weapon IP → damage and head/armor/shoes IP → survivability): **{fight_ip:.0f}**")
+    o.append("\n### Item power used\n" + table([(sl, f"{ip:.0f}", "×2 (two-handed)" if w == 2 else "", src) for sl, ip, w, src in slot_ips],
+                                               ["slot", "IP", "weight", "source"]))
+    o.append(f"Average item power (game formula): **{game_avg:.0f}** · model IP (mean of weapon IP → damage and head/armor/shoes "
+             f"IP → survivability): **{fight_ip:.0f}**")
+    if not (slot_ip or weapon_ip or avg_ip or spec_ip):
+        o.append("_No mastery given: pass avg_ip (character average from the game) and/or slot_ip / weapon_ip for exact numbers._")
     # kit
     o.append("\n### Kit\n" + table([(f, ", ".join(dict.fromkeys(v)) or "—") for f, v in flags.items()], ["capability", "from"]))
     warn = []

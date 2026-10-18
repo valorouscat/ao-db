@@ -100,6 +100,18 @@ class GearCheck(unittest.TestCase):
         flags, _ = gearcheck.kit(entries)
         self.assertTrue(flags["AoE"] and flags["sustain"] and flags["defensive"])
 
+    def test_slot_ip_and_avg_distribution(self):
+        _, entries = gearcheck.parse_loadout(json.dumps(LOADOUT))
+        avg, rows = gearcheck.loadout_ip(entries, weapon_ip=1300, avg_ip=1250)
+        self.assertAlmostEqual(avg, 1250, places=6)
+        ips = {r[0]: r[1] for r in rows}
+        self.assertEqual(ips["mainhand"], 1300)
+        self.assertAlmostEqual(ips["head"], 1250, places=6)    # 1040 + 210
+        self.assertAlmostEqual(ips["cape"], 1150, places=6)    # 940 + 210
+        self.assertAlmostEqual(gearcheck.model_ip(rows), 1275, places=6)
+        _, rows = gearcheck.loadout_ip(entries, slot_ip="weapon=1300,шлем=1200")
+        self.assertEqual({r[0]: r[1] for r in rows}["head"], 1200)
+
     def test_camp_model(self):
         prof = gearcheck.content_profile("AVALON_SMALL_SOLO", [6])
         self.assertEqual([p["stage"] for p in prof], [0, 1, 2])

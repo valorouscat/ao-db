@@ -89,8 +89,10 @@ TOOLS = [
          params=dict(loadout=P(S, "Loadout JSON (in-game export format with equipment/inventory) or @path/to/file.json", required=True),
                      content=P(S, "avalon_solo (green), avalon_veteran (blue), avalon_elite (gold)", "avalon_solo"),
                      tiers=P(A, "Content tiers to check, e.g. ['4','6','8']"), stages=P(A, "Chest stages: small, medium, large"),
-                     spec_ip=P(I, "Extra IP added to the average (armor/other masteries)", 0),
-                     weapon_ip=P(I, "Weapon item power shown in game incl. mastery (replaces the main-hand IP)"), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
+                     spec_ip=P(I, "Flat extra IP for every slot without an explicit value", 0),
+                     weapon_ip=P(I, "Weapon item power shown in game incl. mastery (= slot_ip mainhand)"),
+                     slot_ip=P(S, "In-game IP per slot incl. mastery, e.g. 'mainhand=1300,head=1240,armor=1260,shoes=1250,cape=1100'"),
+                     avg_ip=P(I, "Character's average IP from the game; slots without explicit IP share the difference equally"), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
                      city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True))),
     dict(name="chest_value", fn=advisor.chest_value,
          desc="Expected loot value of chests (Avalon roads, corrupted dungeons, hellgates, mists, static dungeons, treasure...) computed "
