@@ -474,7 +474,7 @@ def pvp_check(loadout, content="mists_black", ips=None, intents=None, opponent=N
                  "you win", "disengage", "you die", "time to kill: you→them / them→you"]))
         o.append(f"Field-weighted win rate: **{wsum / tot:.0%}**")
     if price:
-        base = market.price_map([e["id"] for e in me["entries"]], server, city)
+        base = market.price_map([e["id"] for e in me["entries"]], server, city, estimate=True)
         v = sum((base.get(e["id"], (None,))[0] or 0) * e["stack"] for e in me["entries"])
         o.append(f"\n**Re-gear cost** (quality 1 prices, {city}): ≈ {money(v)}" + (" — lost on death here" if rules["lethal"] else
                  " — not at risk here (no item loss)") + (f" · {'; '.join(market.WARNINGS)}" if market.WARNINGS else ""))
@@ -539,7 +539,7 @@ def pvp_builds(content="mists_black", server="europe", pages=10, budget=None, we
     # cost of reaching the reference IP with the cheapest tier/enchant of each item (mastery adds spec_ip on top of base IP);
     # one price request for every candidate of every build
     cands = {id(p): ip_variants(ids, ref_ip - spec_ip) for r, p, wr, ids in out}
-    prices = market.price_map(sorted({v for c in cands.values() for vs in c.values() for v in vs}), server, city)
+    prices = market.price_map(sorted({v for c in cands.values() for vs in c.values() for v in vs}), server, city, estimate=True)
     warn = list(market.WARNINGS)
     ranked = []
     for r, p, wr, ids in out:
@@ -586,7 +586,7 @@ def farm_plan(loadout, contents=None, ips=None, silver_per_hour=None, encounters
     enc = _per_content(encounters_per_hour, keys)
     ip_spec = gearcheck._parse_ips(ips, 1)[0] if ips else {}
     base_player = build_pvp_player(loadout, ip_spec, None)
-    prices = market.price_map([e["id"] for e in base_player["entries"]], server, city)
+    prices = market.price_map([e["id"] for e in base_player["entries"]], server, city, estimate=True)
     regear = sum((prices.get(e["id"], (None,))[0] or 0) * e["stack"] for e in base_player["entries"])
     fields = {}
     rows = []

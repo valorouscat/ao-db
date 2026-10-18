@@ -758,7 +758,7 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
 def _risk(o, players, server, city):
     total, lines = 0.0, []
     for p in players:
-        base = market.price_map([e["id"] for e in p["entries"]], server, city)
+        base = market.price_map([e["id"] for e in p["entries"]], server, city, estimate=True)
         if market.WARNINGS:
             lines.append(f"price API unavailable ({'; '.join(market.WARNINGS)})")
             break

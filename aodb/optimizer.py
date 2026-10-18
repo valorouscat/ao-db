@@ -25,6 +25,7 @@ KITS = [
                                                             ("SHOES_LEATHER_SET1", "CLEANSE_DASH", "PASSIVE_BALANCE")]),
 ]
 CONSUMABLES = [("T7_MEAL_ROAST", 3), ("T6_POTION_HEAL", 3), ("T8_POTION_CLEANSE", 1)]
+ARTIFACT_TAGS = ("_HELL", "_UNDEAD", "_KEEPER", "_AVALON", "_MORGANA", "_CRYSTAL")
 LEVELS = (800, 900, 1000, 1100, 1200)       # base item power of the gear
 BANDS = ((0, 150_000), (150_000, 300_000), (300_000, 600_000), (600_000, 1_200_000), (1_200_000, 10 ** 12))
 WEIGHTS = {"pve_safe": 0.35, "pve_speed": 0.10, "pvp_win": 0.40, "pvp_live": 0.15}
@@ -37,8 +38,9 @@ def weapon_families(classes):
 
 
 def _variant_at(fam, level):
-    """Item ids of a family whose base IP equals the level (e.g. 1000 = 4.3 / 5.2 / 6.1 / 7.0)."""
-    return [r["id"] for r in q("SELECT id FROM items WHERE id GLOB ? AND itempower=?", f"T[0-9]_{fam}*", level)
+    """Item ids of a family whose base IP falls in the level's band [level, level+99] (e.g. 1000 = 4.3 / 5.2 / 6.1 / 7.0;
+    artifact weapons carry +25…+100 IP, e.g. Bow of Badon 6.0 = 975 → band 900)."""
+    return [r["id"] for r in q("SELECT id FROM items WHERE id GLOB ? AND itempower>=? AND itempower<?", f"T[0-9]_{fam}*", level, level + 100)
             if gearcheck.advisor._family(r["id"]) == fam]
 
 
@@ -72,13 +74,14 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     # prices: every variant of every item at every level, in one request
     fams = set(wfams) | {f for _, k in KITS for f, _, _ in k} | {"OFF_TORCH", "CAPE"}
     var = {(f, lv): _variant_at(f, lv) for f in fams for lv in levels}
-    prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for i, _ in CONSUMABLES}), server, city)
+    prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for i, _ in CONSUMABLES}), server, city, estimate=True)
+    is_est = lambda i: prices.get(i, (None, ""))[1].startswith("≈")
     warn = list(market.WARNINGS)
     cheap = {}
     for k_, vs in var.items():
-        priced = sorted((prices[v][0], v) for v in vs if prices.get(v, (None,))[0])
+        priced = sorted((is_est(v), prices[v][0], v) for v in vs if prices.get(v, (None,))[0])  # real prices first
         if priced:
-            cheap[k_] = priced[0][1]
+            cheap[k_] = priced[0][2]
     cons_cost = sum((prices.get(i, (None,))[0] or 0) * n for i, n in CONSUMABLES)
     lvl_price = {k_: prices[v][0] for k_, v in cheap.items()}
 
@@ -86,12 +89,16 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         """Market price, or an estimate from the same item's priced neighbouring IP levels (geometric), flagged."""
         pr = prices.get(item, (None,))[0]
         if pr:
-            return pr, False
+            return pr, is_est(item)
         fam, lv = gearcheck.advisor._family(item), q1("SELECT itempower FROM items WHERE id=?", item)
-        lv = lv["itempower"] if lv else None
+        lv = (lv["itempower"] // 100 * 100) if lv and lv["itempower"] else None  # level band
         known = sorted((l_, p_) for (f_, l_), p_ in lvl_price.items() if f_ == fam)
-        if not known or lv is None:
+        if lv is None:
             return None, True
+        if not known:  # never listed (rare artifacts): median of other artifact weapons of the same class at this IP
+            art = lambda f: any(t in f for t in ARTIFACT_TAGS)
+            peers = [p_ for (f_, l_), p_ in lvl_price.items() if l_ == lv and f_ in wfams and art(f_) == art(fam) and f_ != fam]
+            return (statistics.median(peers), True) if peers else (None, True)
         lower = [x for x in known if x[0] < lv]
         upper = [x for x in known if x[0] > lv]
         if lower and upper:
@@ -107,9 +114,9 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
 
     def evaluate(wfam, kit, level):
         lo = _loadout(wfam, kit, level, cheap)
-        ips = f"avg={level + spec_ip}"
-        pve = encounter.pve_summary(lo, key, ips, maps=4) or {"low": 0, "low_pess": 0, "elite": 1, "fame_h": 0, "minutes": 99}
-        me = pvp.build_pvp_player(lo, {"avg_ip": level + spec_ip}, rules)
+        spec = {"spec_ip": spec_ip}  # IP from the actual items (artifact bonus included) + mastery
+        pve = encounter.pve_summary(lo, key, ip_spec=spec, maps=4) or {"low": 0, "low_pess": 0, "elite": 1, "fame_h": 0, "minutes": 99}
+        me = pvp.build_pvp_player(lo, spec, rules)
         tw = sum(w for _, w in field)
         duels = [(pvp.duel(me, o), w) for o, w in field]
         win = sum(d["win"] * w for d, w in duels) / tw
@@ -185,7 +192,9 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     unp = sorted({r["loadout"]["name"].split(" · ")[0] for r in results if r["missing"]})
     if unp:
         o.append(f"_Skipped for missing prices: {', '.join(unp)}_")
-    o.append("_~ = some item prices estimated from the same item's other IP levels (no listing at this level)._")
+    n_est = sum(1 for v in {v for vs in var.values() for v in vs} if is_est(v))
+    o.append("_~ = some item prices are estimates: last known price, the same item's other IP levels, or game item value × the "
+             "market ratio of priced items" + (f" ({n_est} item variants estimated this run — the market API was rate limited)" if n_est else "") + "._")
     o.append(f"\n_IP = base item power of the gear + {spec_ip} assumed from mastery (pass spec_ip). Camp numbers are calibrated on "
              "the real-outcome journal; PvP is the duel model vs open-world killboard builds — skill, positioning and cooldown "
              "timing are not modelled. Spells: picked for PvP per slot (damage, CC, escapes)._")

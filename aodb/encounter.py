@@ -415,7 +415,7 @@ def _cal_line(cal):
             (f" from {cal['tn']} recorded clear time(s)" if cal["tn"] else " (no recorded clear times: add clear_minutes to record_outcome)") + "._")
 
 
-def pve_summary(loadout, content, ips=None, intents=None, maps=4):
+def pve_summary(loadout, content, ips=None, intents=None, maps=4, ip_spec=None):
     """{'minutes', 'low', 'low_pess', 'fame_h', 'elite'} — median over maps, for farm_plan; None if not simulable."""
     try:
         key = resolve(content)
@@ -423,7 +423,7 @@ def pve_summary(loadout, content, ips=None, intents=None, maps=4):
         return None
     title, kind, tier, zone, continent = CONTENT[key]
     rules = pvp.zone_rules(zone)
-    p = gearcheck.build_player(loadout, gearcheck._parse_ips(ips, 1)[0] if ips else {}, intents)
+    p = gearcheck.build_player(loadout, ip_spec or (gearcheck._parse_ips(ips, 1)[0] if ips else {}), intents)
     if rules["cap"] and p["weapon"] > rules["cap"]:
         p = dict(p, weapon=pvp.effective_ip(p["weapon"], rules), armor=pvp.effective_ip(p["armor"], rules))
     cal = sim_calibration()

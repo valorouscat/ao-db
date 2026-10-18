@@ -331,6 +331,8 @@ class Encounters(unittest.TestCase):
         self.assertTrue(any("OFF_TORCH" in e["item"] for e in lo["equipment"]))  # one-handed weapon gets an off-hand
         from aodb import combat, market
         self.assertEqual(combat.spell_profile("SKILLSHOT_STUN", "players")["dmg"], 232)  # near/far alternatives, player version only
+        self.assertIn("T6_2H_BOW_KEEPER", optimizer._variant_at("2H_BOW_KEEPER", 900))  # artifact 975 IP sits in the 900 band
+        self.assertEqual(market._value_ratio([], True)[0], 10.0)                  # default market/value ratio, consumables
         self.assertTrue(market._absurd("T8_POTION_CLEANSE", 13_000_000))           # troll listing
         self.assertFalse(market._absurd("T8_POTION_CLEANSE", 15_000))
 

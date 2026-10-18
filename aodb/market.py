@@ -40,6 +40,11 @@ def _get(kind, ids, server, **params):
                 time.sleep(3)
                 continue
             if e.code == 429:
+                stale = _stale(cpath)
+                if stale is not None:  # an older answer to the same request beats nothing
+                    WARNINGS.append(f"rate limited — used a cached answer {stale[1]:.0f} min old")
+                    _cache[url] = (time.time(), stale[0])
+                    return stale[0]
                 raise AOError("Market API rate limit (HTTP 429) — try again in a few minutes")
             raise AOError(f"Market API request failed: {e}")
         except Exception as e:  # network failure is a user-facing condition
@@ -52,6 +57,49 @@ def _get(kind, ids, server, **params):
     except OSError:
         pass
     return data
+
+
+def _stale(cpath):
+    """(data, age in minutes) of a disk-cached answer of any age, or None."""
+    try:
+        with open(cpath, encoding="utf-8") as fh:
+            return json.load(fh), (time.time() - os.path.getmtime(cpath)) / 60
+    except (OSError, ValueError):
+        return None
+
+
+LAST_PRICES = os.path.join(CACHE_DIR, "last_prices.json")  # {server|city|quality|item: [price, unix time, source]}
+
+
+def _last_load():
+    try:
+        with open(LAST_PRICES, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _last_save(store):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = LAST_PRICES + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(store, fh)
+        os.replace(tmp, LAST_PRICES)
+    except OSError:
+        pass
+
+
+def _is_consumable(item_id):
+    from .core import q1
+    r = q1("SELECT kind, slot FROM items WHERE id=?", item_id)
+    return bool(r) and (r["kind"] == "consumableitem" or r["slot"] in ("food", "potion"))
+
+
+def _value_ratio(pairs, consumable):
+    """Median market price / game item value over priced items of the same kind (equipment vs consumables)."""
+    rs = sorted(p / v for i, p, v in pairs if v and p and _is_consumable(i) == consumable)
+    return (rs[len(rs) // 2], len(rs)) if len(rs) >= 3 else ((10.0 if consumable else 20.0), 0)
 
 
 def _hours(ts):
@@ -212,9 +260,11 @@ def _absurd(item_id, price):
     return bool(v) and price > ABSURD_VALUE_RATIO * v
 
 
-def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_history=True):
+def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_history=True, estimate=False):
     """{item_id: (unit_price, source)} — live sell_price_min, falling back to (or capped by) the recent average.
-    API failures (e.g. rate limits) degrade to 'no data' and are reported in WARNINGS instead of raising."""
+    API failures (e.g. rate limits) degrade to 'no data' and are reported in WARNINGS instead of raising.
+    estimate=True fills the gaps: last known price of the item (any age), else game item value × the market/value ratio of
+    priced items of the same kind; such sources start with '≈'."""
     ids = list(dict.fromkeys(ids))
     WARNINGS.clear()
     live, hist = {}, {}
@@ -264,4 +314,25 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
             out[i] = (med, f"median of {len(xs)} other cities")
         else:
             out[i] = (None, "no data")
+    store, key = _last_load(), f"{server}|{city}|{quality}|"
+    now = time.time()
+    fresh = {i: v for i, v in out.items() if v[0] and not v[1].startswith("≈")}
+    for i, (pr, src) in fresh.items():
+        store[key + i] = [pr, now, src]
+    if fresh:
+        _last_save(store)
+    if estimate:
+        pairs = [(i, pr, item_value(i)) for i, (pr, _) in fresh.items()]
+        pairs += [(k[len(key):], v[0], item_value(k[len(key):])) for k, v in store.items() if k.startswith(key) and k[len(key):] not in fresh][:400]
+        for i, (pr, src) in list(out.items()):
+            if pr:
+                continue
+            last = store.get(key + i)
+            if last:
+                out[i] = (last[0], f"≈ last known price, {(now - last[1]) / 3600:.0f}h old")
+                continue
+            v = item_value(i)
+            if v:
+                ratio, n = _value_ratio(pairs, _is_consumable(i))
+                out[i] = (v * ratio, f"≈ estimate: item value {v:,.0f} × {ratio:.0f}" + (f" (median of {n} priced items)" if n else " (default ratio)"))
     return out

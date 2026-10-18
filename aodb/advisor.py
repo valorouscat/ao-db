@@ -216,8 +216,9 @@ def build_cost(items, server="europe", city="Caerleon", quality=1, compare_encha
             if it["slot"] in EQUIP_SLOTS and it["kind"] in ("weapon", "equipmentitem", "transformationweapon"):
                 variants[iid] = [f"{it['base_id']}@{e}" if e else it["base_id"] for e in range(0, 4)]
                 ids.update(variants[iid])
-    prices = market.price_map(sorted(ids), server, city, quality)
+    prices = market.price_map(sorted(ids), server, city, quality, estimate=True)
     rows, total, missing = [], 0.0, []
+    est = [i for i, n, it in entries if prices.get(i, (None, ""))[1].startswith("≈")]
     ip_sum, ip_n = 0, 0
     for iid, n, it in entries:
         p, src = prices.get(iid, (None, "no data"))
@@ -233,7 +234,9 @@ def build_cost(items, server="europe", city="Caerleon", quality=1, compare_encha
         rows.append((it["slot"] or it["kind"], f"![]({core.ICON.format(iid)}?size=32) {label(iid)}", n, ip or "", money(p), src, money(line)))
     o = [f"## Build cost — {city} ({server}), quality {quality} ({core.QUALITY_NAMES.get(quality)})", "",
          table(rows, ["slot", "item", "qty", "IP", "unit price", "source", "total"]),
-         f"\n**Estimated total: {money(total)} silver**" + (f" (+ unknown: {', '.join(f'`{m}`' for m in missing)})" if missing else "")]
+         f"\n**Estimated total: {money(total)} silver**" + (f" (+ unknown: {', '.join(f'`{m}`' for m in missing)})" if missing else "")
+         + (f" — **≈ {len(est)} of {len(entries)} prices estimated** (market API unavailable: last known price or item value × "
+            "market ratio); re-run later for live prices" if est else "")]
     if ip_n:
         o.append(f"Base item power ≈ **{ip_sum / ip_n:.0f}** (gear slots, quality bonus included; mastery/spec not included).")
     if variants:
