@@ -44,6 +44,14 @@ PULL_RADIUS = 10.0
 COORDINATION = 0.075
 BURST_GAP = 150
 NEUTRAL_MIX = {"physical": 0.5, "magic": 0.5}
+DODGE = 0.9          # default: share of telegraphed (ground/area, wind-up) ability damage a player avoids
+DODGE_LOW = 0.5      # pessimistic scenario
+KITE = 0.5           # ranged player vs melee mobs: share of melee auto-attack damage still taken
+DEF_BASELINE = 1.3   # defense multiplier of a "typical" kit at par (anchor assumption)
+BASE_HP = 1800       # player max HP at 1000 armor IP (leather) — assumed; ×1.06 per +100 IP, plate ×1.15, cloth ×0.9
+SUSTAIN_FLOOR = 0.35 # incoming damage after defenses never drops below 35% of raw (defense multiplier ≤ ×2.9)
+CC_CAP_SPELL = 0.25  # one spell keeps the pull disabled at most 25% of the time
+CC_CAP_GROUP = 0.35
 
 
 # ------------------------------------------------------------------ loadout
@@ -163,8 +171,6 @@ ROLE_FACTORS = {  # damage share, survivability when focused
     "Tank": (0.6, 1.6), "DPS": (1.0, 1.0), "Ranged_DPS": (1.0, 1.0), "Support": (0.6, 1.0), "Heal": (0.3, 1.0),
     "Hybrid_Heal": (0.8, 1.0),  # healing weapon with damage spells on Q/W: mostly damage, light group healing
 }
-HYBRID_HEAL_BONUS = 0.4
-HEAL_BONUS = (0.8, 0.4)        # focused target survivability +80% from the 1st healer, +40% from the 2nd
 SUPPORT_DMG = 0.15             # arcane-style support: +15% group damage each
 SPREAD_BONUS = 0.25            # no tank: aggro can be swapped/kited, +25% per extra player
 
@@ -320,18 +326,25 @@ def _variant(beh, level, solo):
     mobs = json.loads(r["mobs"])
     ok = [m for m in mobs if m["level"] <= level] or mobs[:1]
     top = max(m["level"] for m in ok)
-    cands = [(m["mob"], combat.mob_combat(m["mob"], solo)) for m in ok if m["level"] == top]
+    cands = [(m["mob"], combat.mob_profile(m["mob"], solo)) for m in ok if m["level"] == top]
     cands = [(mid, c) for mid, c in cands if c]
     if not cands:
         return None
     avg = lambda k: sum(c[k] for _, c in cands) / len(cands)
     name = q1("SELECT name_en FROM mobs WHERE id=?", cands[0][0])["name_en"] or cands[0][0]
-    return {"name": name if len(cands) == 1 else f"{name} (+{len(cands) - 1} variants)", "hp": avg("hp"), "dps": avg("dps"),
-            "armor": avg("armor"), "mres": avg("mres"), "boss": "BOSS" in beh,
-            "heavy": sorted({h[0] for _, c in cands for h in c["heavy"]})}
+    return {"name": name if len(cands) == 1 else f"{name} (+{len(cands) - 1} variants)", "hp": avg("hp"), "auto": avg("auto"),
+            "dodgeable": avg("dodgeable"), "targeted": avg("targeted"), "armor": avg("armor"), "mres": avg("mres"),
+            "melee": sum(1 for _, c in cands if c["melee"]) / len(cands), "boss": "BOSS" in beh,
+            "heavy": sorted({h for _, c in cands for h in c["heavy"]}, key=lambda h: -h[1])}
 
 
-def eval_layer(layer, tier, level, mix, solo):
+def mob_dps(g, dodge, kite_ranged):
+    """Incoming DPS from one guard for a player who dodges `dodge` of telegraphed abilities (and kites melee if ranged)."""
+    auto = g["auto"] * ((1 - g["melee"]) + g["melee"] * (KITE if kite_ranged else 1))
+    return auto + g["targeted"] + g["dodgeable"] * (1 - dodge)
+
+
+def eval_layer(layer, tier, level, mix, solo, dodge=DODGE, kite_ranged=False):
     guards = json.loads(layer["guards"] or "[]")
     tier_ok = lambda b: re.match(rf"T{tier}_", b) or re.search(rf"_T{tier}$", b)
     pts = []
@@ -348,16 +361,18 @@ def eval_layer(layer, tier, level, mix, solo):
     for pull in pulls:
         hp_eff = sum(g["hp"] / (mix.get("physical", 0) * combat.mitigation(g["armor"]) * 3.34 +
                                 mix.get("magic", 0) * combat.mitigation(g["mres"]) * 3.34 or 1) for g in pull)
-        dps = sum(g["dps"] for g in pull)
+        dps = sum(mob_dps(g, dodge, kite_ranged) for g in pull)
         f = hp_eff * dps
         if not best or f > best["F"]:
-            best = {"F": f, "pull": pull, "hp": sum(g["hp"] for g in pull), "dps": dps}
-    best.update(guards=len(pts), total_hp=sum(p[2]["hp"] for p in pts), pulls=len(pulls),
-                heavy=sorted({h for p in pts for h in p[2]["heavy"]}), template=f"{layer['template']} › {layer['layer'].strip()}")
+            best = {"F": f, "pull": pull, "hp": sum(g["hp"] for g in pull), "hp_eff": hp_eff, "dps": dps,
+                    "res": sum((g["armor"] + g["mres"]) / 2 for g in pull) / len(pull)}
+    heavy = sorted({h for p in pts for h in p[2]["heavy"]}, key=lambda h: -h[1])
+    best.update(guards=len(pts), total_hp=sum(p[2]["hp"] for p in pts), pulls=len(pulls), heavy=heavy,
+                template=f"{layer['template']} › {layer['layer'].strip()}")
     return best
 
 
-def content_eval(behaviour, tier, mix, solo):
+def content_eval(behaviour, tier, mix, solo, dodge=DODGE, kite_ranged=False):
     """Per chest stage: evaluation of every template variant of the camp at this tier."""
     up = q1("SELECT stages FROM chest_upgrades WHERE name=?", behaviour)
     if not up:
@@ -366,7 +381,7 @@ def content_eval(behaviour, tier, mix, solo):
     layers = [c for c in q("SELECT * FROM camps WHERE chest_behaviour=?", behaviour) if re.search(rf"T{tier}(?!\d)", c["layer"])]
     out = []
     for i, st in enumerate(stages):
-        evals = [e for e in (eval_layer(l, tier, st["level"], mix, solo) for l in layers) if e]
+        evals = [e for e in (eval_layer(l, tier, st["level"], mix, solo, dodge, kite_ranged) for l in layers) if e]
         if evals:
             out.append({"stage": i, "chest": st["chest"], "level": st["level"], "weight": st["weight"], "evals": evals})
     return out
@@ -422,8 +437,42 @@ def build_player(lo, ip_spec=None, intents=None):
     role, _ = detect_role(entries)
     flags, _ = kit(entries)
     wf, mix, parts = (combat.weapon_factor(weapon_e["id"], weapon_e["active"]) if weapon_e else (1.0, NEUTRAL_MIX, []))
+    kit_base = combat.kit_dps(weapon_e["id"], weapon_e["active"])[0] if weapon_e else combat.reference_kit_dps(3)
+    dfn = {"shield_ps": 0.0, "heal_self_ps": 0.0, "heal_ally_ps": 0.0, "heal_pct_ps": 0.0, "lifesteal": 0.0, "cc": [], "invuln_frac": 0.0,
+           "sources": []}
+    for e in entries:
+        sids = list(e["active"]) + list(e["passive"])
+        cs = core.item_json(e["id"]).get("@consumespell")
+        if cs and (e["row"]["slot"] in ("food", "potion") or e["inventory"]):
+            sids.append(cs)
+        for sid in sids:
+            sd = combat.spell_defense(sid)
+            if not sd:
+                continue
+            used = False
+            for k in ("shield_ps", "heal_self_ps", "heal_ally_ps", "heal_pct_ps", "invuln_frac"):
+                if sd[k]:
+                    dfn[k] += sd[k]
+                    used = True
+            if sd["lifesteal"]:
+                dfn["lifesteal"] += sd["lifesteal"]
+                used = True
+            if sd["cc_frac"]:
+                dfn["cc"].append((sd["cc_frac"], sd["aoe"]))
+                used = True
+            if used:
+                nm = q1("SELECT name_en FROM spells WHERE id=?", sid)
+                dfn["sources"].append((nm["name_en"] if nm else sid) or sid)
+    chest = next((e for e in entries if e["row"]["slot"] == "armor" and not e["inventory"]), None)
+    chest_kind = chest["row"]["sub1"] if chest else ""
+    hp = BASE_HP * 1.06 ** ((armor_ip - 1000) / 100) * {"plate_armor": 1.15, "cloth_armor": 0.9}.get(chest_kind, 1.0)
+    res = (combat.num(core.item_json(chest["id"]).get("@physicalarmor")) or 0) if chest else 0
+    res *= 1.03 ** ((armor_ip - 1000) / 100)
+    ranged = bool(weapon_e) and (combat.num(core.item_json(weapon_e["id"]).get("@attackrange")) or 3) >= 8
+    ap = ((combat.num(core.item_json(weapon_e["id"]).get("@abilitypower")) or 100) / 100) if weapon_e else 1.0
     return {"name": name, "entries": entries, "rows": rows, "avg": game_avg, "weapon": weapon_ip, "armor": armor_ip, "role": role,
-            "flags": flags, "wf": wf, "mix": mix, "parts": parts, "weapon_e": weapon_e, "explicit": bool(avg_ip or slot_ip or ip_spec)}
+            "flags": flags, "wf": wf, "mix": mix, "parts": parts, "weapon_e": weapon_e, "explicit": bool(avg_ip or slot_ip or ip_spec),
+            "def": dfn, "hp": hp, "res": res, "ranged": ranged, "kit_base": kit_base, "ap": ap}
 
 
 def group_power(players):
@@ -431,11 +480,13 @@ def group_power(players):
     dmg *= 1 + SUPPORT_DMG * sum(1 for p in players if p["role"] == "Support")
     dmg *= 1 - COORDINATION * (len(players) - 1)
     tanks = [p for p in players if p["role"] == "Tank"]
-    focus = max(tanks or players, key=lambda p: p["armor"] * ROLE_FACTORS.get(p["role"], (1, 1))[1])
+    # who the mobs hit: the tank; otherwise a melee player; otherwise the biggest damage dealer (highest threat)
+    melee = [p for p in players if not p["ranged"] and p["role"] not in ("Heal",)]
+    focus = (max(tanks, key=lambda p: p["armor"]) if tanks else
+             max(melee or [p for p in players if p["role"] != "Heal"] or players,
+                 key=lambda p: ROLE_FACTORS.get(p["role"], (1, 1))[0] * p["wf"] * 1.0918 ** ((p["weapon"] - 1000) / 100)))
     surv = 1.0918 ** ((focus["armor"] - 1000) / 100) * ROLE_FACTORS.get(focus["role"], (1, 1))[1]
-    healers = [p for p in players if p["role"] == "Heal"]
-    surv *= 1 + sum(HEAL_BONUS[i] if i < len(HEAL_BONUS) else 0.2 for i in range(len(healers)))
-    surv *= 1 + HYBRID_HEAL_BONUS * min(1, sum(1 for p in players if p["role"] == "Hybrid_Heal" and p is not focus))
+    healers = [p for p in players if p["role"] == "Heal"]  # healing itself comes from their spells (defense model)
     if not tanks and len(players) > 1:
         surv *= 1 + SPREAD_BONUS * (len(players) - 1)
     weights = [ROLE_FACTORS.get(p["role"], (1, 1))[0] * p["wf"] for p in players]
@@ -448,28 +499,73 @@ def group_power(players):
             "tanks": tanks, "healers": healers}
 
 
-def _content_section(o, behaviour, tiers, want, gp, solo):
-    res, heavy, details = [], set(), []
+def defense_multiplier(players, focus, ev, dodge):
+    """Incoming DPS of the pull before / after the group's defenses (CC, invulnerability, shields, heals, lifesteal)."""
+    raw = sum(mob_dps(g, dodge, focus["ranged"]) for g in ev["pull"])
+    n = max(len(ev["pull"]), 1)
+    cc = min(sum(min(f, CC_CAP_SPELL) * (1 if aoe else 1 / n) for p in players for f, aoe in p["def"]["cc"]), CC_CAP_GROUP)
+    ipf = lambda p: 1.0918 ** ((p["weapon"] - 1000) / 100) * p["ap"]  # IP progression × the weapon's ability power
+    d = focus["def"]
+    sustain = (d["shield_ps"] + d["heal_self_ps"]) * ipf(focus) + d["heal_pct_ps"] * focus["hp"]
+    sustain += d["lifesteal"] * focus["kit_base"] * ipf(focus) * combat.mitigation(ev["res"]) * 3.34 * 0.3
+    sustain += sum(p["def"]["heal_ally_ps"] * ipf(p) for p in players)  # ally heals (incl. the focus's own AoE heals)
+    net = max(raw * (1 - cc) * (1 - min(d["invuln_frac"], 0.3)) - sustain, SUSTAIN_FLOOR * raw)
+    return raw / net if net else 1.0, cc, sustain
+
+
+def heavy_check(focus, evals):
+    """Worst telegraphed hit across the camp's variants landing on the focused player (no shield up)."""
+    heavy = sorted({h for e in evals for h in e["heavy"]}, key=lambda h: -h[1])
+    if not heavy:
+        return "no heavy hits"
+    sid, hit = heavy[0]
+    taken = hit * combat.mitigation(focus["res"]) * 1.5  # mitigation formula is generous for single big hits: assume ×1.5
+    left = focus["hp"] - taken
+    name = re.sub(r"^MOB_|_", " ", sid).strip().title()
+    if left <= 0:
+        return f"💀 one-shot ({name}: ~{taken:,.0f} vs {focus['hp']:,.0f} HP)"
+    pct = taken / focus["hp"]
+    return (f"⚠ {pct:.0%} HP" if pct >= 0.6 else f"survives, {pct:.0%} HP") + f" ({name})"
+
+
+def _content_section(o, behaviour, tiers, want, gp, solo, players, dodge=DODGE, dodge_low=DODGE_LOW):
+    focus = gp["focus"]
+    res, details, defs = [], [], []
+    heavy_all = set()
     for t in tiers:
-        for st in content_eval(behaviour, t, gp["mix"], solo):
+        hi = content_eval(behaviour, t, gp["mix"], solo, dodge, focus["ranged"])
+        lo = {st["stage"]: st for st in content_eval(behaviour, t, gp["mix"], solo, dodge_low, focus["ranged"])}
+        for st in hi:
             if want is not None and st["stage"] not in want:
                 continue
-            needs = sorted(needed_ip(e["F"], t) for e in st["evals"])
-            med = statistics.median(needs)
+            row = []
+            for scen, stage in (("hi", st), ("lo", lo.get(st["stage"]))):
+                needs, adj = [], []
+                for e in stage["evals"]:
+                    m, cc, sus = defense_multiplier(players, focus, e, dodge if scen == "hi" else dodge_low)
+                    a = 100 * math.log(m / DEF_BASELINE) / PER100
+                    needs.append(needed_ip(e["F"], t))
+                    adj.append(a)
+                med_need = statistics.median(needs)
+                med_adj = statistics.median(adj)
+                row.append((med_need, med_adj, gp["ip"] + med_adj - med_need))
             worst = max(st["evals"], key=lambda e: e["F"])
-            margin = gp["ip"] - med
-            heavy.update(worst["heavy"])
+            m, cc, sus = defense_multiplier(players, focus, worst, dodge)
+            heavy_all.update(h[0] for h in worst["heavy"])
+            stage_name = ["small", "medium", "large"][min(st["stage"], 2)]
+            res.append((f"T{t}", stage_name, f"{row[0][0]:.0f}", f"{gp['ip'] + row[0][1]:.0f}", f"{row[0][2]:+.0f}",
+                        _verdict_capped(row[0][2], focus["armor"], t), f"{row[1][2]:+.0f}", _verdict_capped(row[1][2], focus["armor"], t),
+                        heavy_check(focus, st["evals"])))
             pull = Counter(g["name"] for g in worst["pull"])
-            details.append((f"T{t}", ["small", "medium", "large"][min(st["stage"], 2)],
-                            ", ".join(f"{n}× {m}" for m, n in pull.most_common(4)), f"{worst['hp']:,.0f}", f"{worst['dps']:,.0f}"))
-            res.append((f"T{t}", ["small", "medium", "large"][min(st["stage"], 2)], len(st["evals"]),
-                        f"{worst['guards']}", f"{needs[0]:.0f}–{needs[-1]:.0f}", f"{med:.0f}", f"{margin:+.0f}",
-                        _verdict_capped(margin, gp["focus"]["armor"], t)))
+            details.append((f"T{t}", stage_name, ", ".join(f"{n}× {m_}" for m_, n in pull.most_common(4)), f"{worst['hp']:,.0f}",
+                            f"{worst['dps']:,.0f}", f"×{m:.2f} (CC {cc:.0%}, sustain {sus:,.0f}/s)"))
     o.append(f"\n### Content strength — `{behaviour}` (concrete guards, all template variants)\n" +
-             table(res, ["tier", "chest", "variants", "guards", "IP needed (best–worst)", "median", "margin", "verdict"]))
-    o.append("\n**Hardest pull (worst variant)**\n" + table(details, ["tier", "chest", "mobs in the pull", "pull HP", "pull DPS"]))
-    if heavy:
-        o.append("**Telegraphed heavy hits to dodge:** " + ", ".join(f"`{h}`" for h in sorted(heavy)[:12]) + (" …" if len(heavy) > 12 else ""))
+             table(res, ["tier", "chest", f"IP needed", "your IP + defenses", f"margin @{dodge:.0%} dodge", "verdict",
+                         f"margin @{dodge_low:.0%} dodge", "verdict", "caught heavy hit"]))
+    o.append("\n**Hardest pull (worst variant) and your defenses there**\n" +
+             table(details, ["tier", "chest", "mobs in the pull", "pull HP", f"pull DPS @{dodge:.0%} dodge", "defense multiplier"]))
+    if heavy_all:
+        o.append("**Telegraphed heavy hits (assumed dodged in the margins):** " + ", ".join(f"`{h}`" for h in sorted(heavy_all)[:10]))
 
 
 def _player_table(players):
@@ -482,13 +578,25 @@ def _player_table(players):
                 nm = q1("SELECT name_en FROM spells WHERE id=?", sid)
                 star = "*" if str(idx + 1) in (w.get("auto_slots") or []) else ""
                 sp.append(f"{'QWE'[idx] if idx < 3 else '?'}: {nm['name_en'] if nm else sid}{star}")
+        d = p["def"]
+        dtxt = ", ".join(x for x in (f"shield {d['shield_ps']:.0f}/s" if d["shield_ps"] else "", f"heal {d['heal_self_ps'] + d['heal_ally_ps']:.0f}/s"
+                                     if d["heal_self_ps"] + d["heal_ally_ps"] else "", f"lifesteal {d['lifesteal']:.0%}" if d["lifesteal"] else "",
+                                     f"CC {sum(f for f, _ in d['cc']):.0%}" if d["cc"] else "", "invuln/invis" if d["invuln_frac"] else "",
+                                     "ranged (kites melee)" if p["ranged"] else "melee") if x)
         rows.append((i + 1, p["name"], p["role"].replace("_", " "), f"{p['avg']:.0f}", f"{p['weapon']:.0f}", f"{p['armor']:.0f}",
                      label(w["id"]) if w else "", "; ".join(sp), f"{p['wf']:.2f}",
-                     " / ".join(f"{k} {v:.0%}" for k, v in sorted(p["mix"].items(), key=lambda kv: -kv[1]) if v >= 0.05)))
-    return table(rows, ["#", "loadout", "role", "avg IP", "weapon IP", "armor IP", "weapon", "Q/W/E (*auto-picked)", "weapon factor", "damage type"])
+                     " / ".join(f"{k} {v:.0%}" for k, v in sorted(p["mix"].items(), key=lambda kv: -kv[1]) if v >= 0.05),
+                     f"{p['hp']:,.0f}", dtxt))
+    return table(rows, ["#", "loadout", "role", "avg IP", "weapon IP", "armor IP", "weapon", "Q/W/E (*auto-picked)", "weapon factor",
+                        "damage type", "HP (est.)", "defenses (base values)"])
 
 
-MODEL_NOTE = ("_Model: weapon factor = DPS potential of the chosen spells + auto-attacks vs a 3-mob pull (spells.json effects) ÷ median "
+MODEL_NOTE = ("_Dodging: telegraphed mob abilities (ground/area with wind-up) are avoided at the given rate (default 90%, pessimistic "
+              "50%); instant targeted abilities and auto-attacks always hit; heavy telegraphed hits are excluded from the margins and checked "
+              "separately ('caught heavy hit', no shield up). Defenses from the player's own spells/consumables (spells.json): shields, "
+              "self/ally heals, lifesteal, CC uptime on the pull, invulnerability/invisibility, kiting melee mobs with a ranged weapon; "
+              "relative to a typical kit (×1.3); CC ≤25% per spell / 35% per group, incoming never below 35%. Player HP is estimated (1800 at 1000 armor IP, plate ×1.15, cloth ×0.9)._\n"
+              "_Model: weapon factor = DPS potential of the chosen spells + auto-attacks vs a 3-mob pull (spells.json effects) ÷ median "
               "best kit of all weapons; damage = Σ role share × weapon factor × 1.0918^((weapon IP−1000)/100) × (1 − 7.5% per extra player); "
               "survivability = 1.0918^((armor IP−1000)/100) × role/healer/aggro factors. Content: concrete guards of every template "
               "variant, clustered into pulls (10 m); F = Σ HP/mitigation × Σ (auto + ability) DPS of the hardest pull; mitigation "
@@ -498,7 +606,7 @@ MODEL_NOTE = ("_Model: weapon factor = DPS potential of the chosen spells + auto
 
 # ------------------------------------------------------------------ tools
 def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, weapon_ip=None, slot_ip=None, avg_ip=None,
-               intents=None, server="europe", city="Caerleon", price=True):
+               intents=None, dodge=DODGE, dodge_low=DODGE_LOW, server="europe", city="Caerleon", price=True):
     key = content if content in CONTENT else next((v for a, v in ALIASES.items() if a in (content or "").lower()), None)
     if not key:
         raise AOError(f"Unknown content {content!r}. Supported: {', '.join(CONTENT)} (aliases: green/blue/gold).")
@@ -531,7 +639,7 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
             warn.append(f"`{e['id']}` is actually **{e['row']['name_en']}** (legacy item ID)")
     if warn:
         o.append("⚠ " + "; ".join(warn))
-    _content_section(o, behaviour, tiers, want, gp, solo=True)
+    _content_section(o, behaviour, tiers, want, gp, True, [p], dodge, dodge_low)
     if price:
         _risk(o, [p], server, city)
     o.append("\n" + MODEL_NOTE)
@@ -556,8 +664,8 @@ def _risk(o, players, server, city):
              (f" — total ≈ **{money(total)}**" if total and len(players) > 1 else ""))
 
 
-def group_check(loadouts, content="avalon_veteran", ips=None, intents=None, tiers=None, stages=None, server="europe", city="Caerleon",
-                price=True):
+def group_check(loadouts, content="avalon_veteran", ips=None, intents=None, tiers=None, stages=None, dodge=DODGE, dodge_low=DODGE_LOW,
+                server="europe", city="Caerleon", price=True):
     """Predict how a 2-3 player group performs in PvE camps (concrete guards of the content, kit-based weapon factors)."""
     if isinstance(loadouts, str):
         loadouts = [loadouts]
@@ -582,12 +690,15 @@ def group_check(loadouts, content="avalon_veteran", ips=None, intents=None, tier
                     else "no healer: sustain only from lifesteal/self-heals and potions")
     if not any(p["flags"]["AoE"] for p in players):
         comp.append("no AoE")
+    for p in gp["tanks"]:
+        if not (p["def"]["shield_ps"] or p["def"]["heal_self_ps"] or p["def"]["invuln_frac"] or p["def"]["lifesteal"]):
+            comp.append(f"tank `{p['name']}` has no defensive/sustain abilities selected (armor spells?) — the model can't credit them")
     comp.append(f"crowd control sources: {sum(len(p['flags']['crowd control']) for p in players)}")
     o.append("\n**Composition:** " + "; ".join(comp))
     o.append(f"\n**Group power** ≈ one player at **{gp['ip']:.0f} IP** (damage ×{gp['dmg']:.2f} incl. coordination "
              f"−{COORDINATION * (len(players) - 1):.0%}, focused target `{gp['focus']['name']}` survivability ×{gp['surv']:.2f}; "
              f"group damage type " + " / ".join(f"{k} {v:.0%}" for k, v in gp["mix"].items() if v >= 0.05) + ")")
-    _content_section(o, behaviour, tiers, want, gp, solo=len(players) == 1)
+    _content_section(o, behaviour, tiers, want, gp, len(players) == 1, players, dodge, dodge_low)
     if not intent_size[0] <= len(players) <= intent_size[1]:
         o.append(f"⚠ Content intended for {intent_size[0]}–{intent_size[1]} players; with {len(players)} the "
                  + ("loot is split between more people" if len(players) > intent_size[1] else "camp is tuned for a bigger group"))

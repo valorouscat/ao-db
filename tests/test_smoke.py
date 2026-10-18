@@ -130,6 +130,19 @@ class GearCheck(unittest.TestCase):
         self.assertTrue(combat.spell_profile("THORNSAREA")["aoe"])
         self.assertIn("LIGHTNING_ARROW", [x[0] for x in combat.weapon_spells("T6_2H_BOW_KEEPER")["3"]])  # artifact's own E
 
+    def test_dodge_and_defenses(self):
+        t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
+        self.assertIn("@90% dodge", t)
+        self.assertIn("@50% dodge", t)
+        self.assertIn("caught heavy hit", t)
+        row = next(l for l in t.splitlines() if l.startswith("| T6 | large | "))
+        cells = [c.strip() for c in row.split("|")]
+        self.assertGreaterEqual(float(cells[5]), float(cells[7]))  # less dodging never helps
+        from aodb import combat
+        self.assertGreater(combat.spell_defense("ENERGY_BARRIER")["shield_ps"], 0)
+        self.assertGreater(combat.spell_defense("CIRCLEOFLIFE")["heal_ally_ps"], 0)
+        self.assertGreater(combat.spell_defense("FOOD_BUFF_LIFESTEAL_P5")["lifesteal"], 0)
+
     def test_intents(self):
         self.assertEqual(gearcheck.parse_intents("Q W на урон"), {"1": "damage", "2": "damage"})
         _, e = gearcheck.parse_loadout(json.dumps({"equipment": [{"item": "T4_MAIN_NATURESTAFF_KEEPER@1"}]}))
@@ -146,11 +159,15 @@ class GroupCheck(unittest.TestCase):
             self.assertEqual(gearcheck.detect_role(e)[0], role)
 
     def test_group_beats_solo_and_composition_matters(self):
-        lo = ["@" + os.path.join(self.EX, f) for f in ("bow_badon.json", "mace_tank.json", "holy_healer.json")]
-        trio = gearcheck.group_check(lo, "blue", ips="avg=1250,mainhand=1300 | avg=1150 | avg=1150", tiers=["6"], price=False)
-        duo = gearcheck.group_check(lo[:1] * 2, "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300", tiers=["6"], price=False)
-        ip = lambda t: float(re.search(r"one player at \*\*(\d+) IP", t).group(1))
-        self.assertGreater(ip(trio), ip(duo))
+        bow, heal = "@" + os.path.join(self.EX, "bow_badon.json"), "@" + os.path.join(self.EX, "holy_healer.json")
+        duo = gearcheck.group_check([bow, bow], "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300", tiers=["6"], price=False)
+        trio = gearcheck.group_check([bow, bow, heal], "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300 | avg=1250",
+                                     tiers=["6"], price=False)
+
+        def margin(t, chest="small"):  # margin @ default dodge for T6 <chest>
+            row = next(l for l in t.splitlines() if l.startswith(f"| T6 | {chest} | "))
+            return float(row.split("|")[5])
+        self.assertGreater(margin(trio), margin(duo))   # adding a healer helps
         self.assertIn("no tank", duo)
         self.assertIn("Loot per player", trio)
         self.assertIn("Hardest pull", trio)

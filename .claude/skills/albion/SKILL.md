@@ -54,7 +54,9 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
 ## Content assessments must use the concrete monsters
 Any "can I/we do X" answer is built on the actual mobs of that content (gear_check / group_check do this: map templates →
 guards per chest stage → each mob's HP, auto-attack + ability DPS, armor/mres, pulls by position, all template variants).
-In the answer, name the hardest pull (which mobs) and the telegraphed mechanics. Never estimate only from "intended group size".
+In the answer, name the hardest pull (which mobs) and the telegraphed mechanics. Always report both dodge scenarios
+(default 90% of telegraphed ground/area abilities, pessimistic 50%) and the "caught heavy hit" check (one-shot or % HP);
+player defenses (shields, heals, lifesteal, CC, invulnerability, kiting) are credited from their actual spells. Never estimate only from "intended group size".
 When the user describes spells in words ("Q W на урон", "хил на E"), pass that as `intents`; the tool picks the matching
 spells per slot and shows them (marked *) — confirm the pick in the answer.
 

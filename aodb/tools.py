@@ -94,7 +94,9 @@ TOOLS = [
                      slot_ip=P(S, "In-game IP per slot incl. mastery, e.g. 'mainhand=1300,head=1240,armor=1260,shoes=1250,cape=1100'"),
                      avg_ip=P(I, "Character's average IP from the game; slots without explicit IP share the difference equally"),
                      intents=P(S, "How Q/W/E are set up when the loadout lacks spells or the user described them: 'q=damage,w=damage' "
-                                  "or free text like 'Q W на урон'"), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
+                                  "or free text like 'Q W на урон'"),
+                     dodge=P(N, "Share of telegraphed (ground/area) mob ability damage dodged", 0.9),
+                     dodge_low=P(N, "Pessimistic dodge share shown as a second scenario", 0.5), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
                      city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True))),
     dict(name="group_check", fn=gearcheck.group_check,
          desc="Predict how a small group (2-3, up to 5) performs in PvE camps, built on the concrete monsters of the content: every "
@@ -106,6 +108,8 @@ TOOLS = [
                      ips=P(S, "In-game IP per player, players separated by '|': 'avg=1250,mainhand=1300 | avg=1180 | head=1200'"),
                      intents=P(S, "Spell intents per player separated by '|': 'q=damage,w=damage | ' (missing spells are auto-picked: "
                                   "damage, or heal for healer weapons)"),
+                     dodge=P(N, "Share of telegraphed (ground/area) mob ability damage dodged", 0.9),
+                     dodge_low=P(N, "Pessimistic dodge share shown as a second scenario", 0.5),
                      tiers=P(A, "Content tiers, e.g. ['4','6','8']"), stages=P(A, "Chest stages: small, medium, large"),
                      server=P(S, "Market server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
                      price=P(B, "Look up re-gear cost", True))),

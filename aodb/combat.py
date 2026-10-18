@@ -266,7 +266,10 @@ HEAVY_HIT = 1500  # per-cast damage (after ability power) treated as a telegraph
 
 
 def _ability_group(sid):
-    return re.sub(r"_(SOLO|INVERTED|TARGETED|CW|CCW|MR|ML|RM|LM|OM|MO|FINALE|\d+)$", "", re.sub(r"_(SOLO|INVERTED)$", "", sid))
+    s = sid
+    for _ in range(3):
+        s = re.sub(r"_(SOLO|INVERTED|TARGETED|CW|CCW|MR|ML|RM|LM|OM|MO|FINALE|CHAMPION|STANDARD|VETERAN|ELITE|BOSS|MINIBOSS|\d+)$", "", s)
+    return s
 
 
 @functools.lru_cache(maxsize=None)
@@ -297,3 +300,163 @@ def mob_combat(mob_id, solo=False):
 def mitigation(res):
     """Damage multiplier for a resistance value (assumed 100/(100+res))."""
     return 100 / (100 + max(res or 0, 0))
+
+
+# ------------------------------------------------------------------ dodging, heavy hits, player defenses
+def single_hit(sid, depth=0, seen=None):
+    """Largest single application of damage to a player in an ability tree (no pulse multipliers): a 'caught' hit."""
+    seen = seen if seen is not None else set()
+    d = spell_json(sid)
+    if not d or sid in seen or depth > 6:
+        return 0.0
+    seen.add(sid)
+    best = 0.0
+
+    def walk(n):
+        nonlocal best
+        if not isinstance(n, dict):
+            return
+        for k, v in n.items():
+            if k.startswith("@") or k in SKIP_KEYS:
+                continue
+            for ch in _aslist(v):
+                if not isinstance(ch, dict):
+                    continue
+                if k == "directattributechange" and ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) < 0 \
+                        and _targets_ok(ch, "players"):
+                    best = max(best, -num(ch["@change"]))
+                elif k == "attributechangeovertime" and ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) < 0 \
+                        and _targets_ok(ch, "players"):
+                    best = max(best, -num(ch["@change"]) * min(num(ch.get("@count")) or 1, MAX_PULSES))
+                for a in ("@spell", "@effect"):
+                    r = ch.get(a)
+                    if r and r != "none" and spell_json(r):
+                        best = max(best, single_hit(r, depth + 1, seen))
+                walk(ch)
+    walk(d)
+    return best
+
+
+def telegraphed(sid):
+    """Ground-targeted / area abilities with a wind-up can be dodged; instant targeted ones cannot."""
+    d = spell_json(sid) or {}
+    windup = (num(d.get("@castingtime")) or 0) + (num(d.get("@hitdelay")) or 0)
+    return d.get("@target") in ("ground", "self") and windup >= 0.3 or (d.get("@target") == "ground")
+
+
+@functools.lru_cache(maxsize=None)
+def mob_profile(mob_id, solo=False):
+    """Mob numbers split for dodging: auto-attack, targeted ability DPS, dodgeable ability DPS, heavy hits (single hit × AP)."""
+    r = q1("SELECT hp, damage, armor, mres, json FROM mobs WHERE id=?", mob_id)
+    if not r or not r["hp"]:
+        return None
+    d = json.loads(r["json"])
+    ap = (num(d.get("@abilitypower")) or 100) / 100
+    auto = (r["damage"] or 0) * (num(d.get("@attackspeed")) or 1)
+    groups, heavy = {}, []
+    for sid, dmg, cyc, aoe in mob_abilities(mob_id):
+        if solo is False and sid.endswith("_SOLO"):
+            continue
+        hit = single_hit(sid) * ap
+        if hit >= HEAVY_HIT:
+            heavy.append((sid, round(hit)))
+            continue
+        g = _ability_group(sid)
+        dps = min(dmg * ap / cyc, 2 * auto)
+        if dps > groups.get(g, (0, False))[0]:
+            groups[g] = (dps, telegraphed(sid))
+    top = sorted(groups.values(), key=lambda x: -x[0])[:2]
+    return {"hp": r["hp"], "auto": auto, "dodgeable": sum(x[0] for x in top if x[1]), "targeted": sum(x[0] for x in top if not x[1]),
+            "armor": r["armor"] or 0, "mres": r["mres"] or 0, "melee": d.get("@attacktype") == "melee",
+            "heavy": heavy, "abilities": sorted(groups)}
+
+
+class DefWalk:
+    """Defensive value of a player's spells/consumables: shields, self/ally heals, lifesteal, CC on enemies, invulnerability."""
+
+    def __init__(self):
+        self.shield = 0.0      # absorb per cast
+        self.heal_self = 0.0   # flat heal per cast
+        self.heal_ally = 0.0
+        self.heal_pct = 0.0    # % max HP per cast
+        self.lifesteal = 0.0   # fraction of damage dealt
+        self.cc = 0.0          # seconds of hard CC applied per cast (per target)
+        self.invuln = 0.0      # seconds untargetable/immune per cast
+        self.seen = set()
+
+    def spell(self, sid, mult=1.0, depth=0, ctx=""):
+        d = spell_json(sid)
+        if not d or sid in self.seen or depth > 6:
+            return
+        self.seen.add(sid)
+        self.walk(d, mult, depth, ctx)
+
+    def walk(self, n, mult, depth, ctx=""):
+        if not isinstance(n, dict):
+            return
+        for k, v in n.items():
+            if k.startswith("@") or k in SKIP_KEYS:
+                continue
+            for ch in _aslist(v):
+                if not isinstance(ch, dict):
+                    continue
+                t = (ch.get("@target") or "").lower()
+                ally = "ally" in t or "friend" in t or (ctx == "ally" and t in ("target", "self", ""))
+                own = t in ("self", "", "target") and ctx != "enemy" or ally
+                if k == "damageshield" and own:
+                    self.shield += (num(ch.get("@damageabsorbed")) or 0) * mult
+                elif k == "directattributechange" and ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) > 0 and own:
+                    val = num(ch["@change"])
+                    if val < 1:
+                        self.heal_pct += val * mult
+                    elif ally:
+                        self.heal_ally += val * mult
+                    else:
+                        self.heal_self += val * mult
+                elif k == "attributechangeovertime" and ch.get("@attribute") == "health" and (num(ch.get("@change")) or 0) > 0 and own:
+                    val = num(ch["@change"]) * min(num(ch.get("@count")) or 1, MAX_PULSES)
+                    if num(ch["@change"]) < 1:
+                        self.heal_pct += val * mult
+                    elif ally:
+                        self.heal_ally += val * mult
+                    else:
+                        self.heal_self += val * mult
+                elif k in ("healonhit", "healonhitpassive"):
+                    self.lifesteal += num(ch.get("@percentage")) or 0
+                elif k in ("stun", "silence", "cannotattack", "root", "knockback", "forcedmovement", "imprison", "fear", "sleep") \
+                        and "enemy" in t:
+                    sec = num(ch.get("@time")) or (0.5 if k in ("knockback", "forcedmovement") else 0)
+                    self.cc += sec * (0.5 if k == "root" else 1.0) * mult  # roots stop melee, not casters
+                elif k in ("invincibility", "invisibility", "nothittable", "notselectable") and own:
+                    self.invuln += (num(ch.get("@time")) or 0) * mult
+                m = mult
+                if k.startswith("applyeffectonevent"):
+                    m *= min(num(ch.get("@count")) or 1, 10)
+                elif k == "pulsingspell":
+                    m *= min(num(ch.get("@count")) or 1, MAX_PULSES)
+                sub_ctx = "ally" if ("ally" in t or "friend" in t) else ("enemy" if "enemy" in t else ctx)
+                for a in ("@spell", "@effect"):
+                    r = ch.get(a)
+                    if r and r != "none" and spell_json(r):
+                        self.spell(r, m, depth + 1, sub_ctx)
+                self.walk(ch, m, depth + 1, sub_ctx)
+
+
+@functools.lru_cache(maxsize=None)
+def spell_defense(sid):
+    """Per-second defensive value of one spell (cooldown-normalised) — dict of rates."""
+    d = spell_json(sid)
+    if not d:
+        return None
+    w = DefWalk()
+    w.spell(sid)
+    cycle = max(num(d.get("@recastdelay")) or 0, GCD) + (num(d.get("@castingtime")) or 0)
+    passive = q1("SELECT kind FROM spells WHERE id=?", sid)
+    is_passive = passive and passive["kind"] == "passivespell"
+    if is_passive or (num(d.get("@recastdelay")) or 0) >= 600:  # passives / long food buffs: always on
+        cycle = None
+    rate = (lambda x: x / cycle) if cycle else (lambda x: x)
+    return {"shield_ps": rate(w.shield) if cycle else 0.0, "heal_self_ps": rate(w.heal_self) if cycle else 0.0,
+            "heal_ally_ps": rate(w.heal_ally) if cycle else 0.0, "heal_pct_ps": rate(w.heal_pct) if cycle else 0.0,
+            "lifesteal": w.lifesteal, "cc_frac": (w.cc / cycle) if cycle else 0.0, "invuln_frac": (w.invuln / cycle) if cycle else 0.0,
+            "aoe": (spell_profile(sid) or {}).get("aoe", False)}
