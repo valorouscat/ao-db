@@ -38,6 +38,10 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      the difference equally). Present the verdict as a model estimate.
    - Small groups (2-3 loadouts): `group_check` → roles, combined power, verdict per camp tier/stage, composition gaps,
      loot per player, total re-gear risk. Ask for each player's in-game IP (`ips`, players separated by '|').
+   - **Real outcomes calibrate the model.** When the user reports how a run actually went (cleared easily / barely / died, lowest HP,
+     consumables), call `record_outcome` (outcome: easy / doable / hard / failed; same loadout + IP as the check) and commit
+     `knowledge/calibration.json`. gear_check/group_check then show calibrated margins with the raw value in brackets;
+     `calibration` lists the journal. With fewer than 3 outcomes say the calibration is low-confidence.
 3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
    (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
    comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.

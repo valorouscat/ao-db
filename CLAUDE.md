@@ -7,5 +7,5 @@
 - Code: `aodb/` — add a feature as a function returning markdown (`core.py` data, `market.py` prices, `advisor.py` analysis),
   then register it in `tools.py`; CLI and MCP are generated from that registry. After `build.py` changes: `python3 -m aodb.build`.
 - `knowledge/*.md`: curated, sourced notes (written via `save_note`); `knowledge/patchnotes/`: official posts from Steam
-  (`python3 -m aodb.patchnotes --update`); commit both. `knowledge.db` is a generated index (gitignored).
+  (`python3 -m aodb.patchnotes --update`); `knowledge/calibration.json`: real fight outcomes (`record_outcome`); commit all. `knowledge.db` is a generated index (gitignored).
 - Tests: `python3 -m unittest discover tests` (needs ao.db; `AO_NET=1` for market).

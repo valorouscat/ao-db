@@ -120,7 +120,7 @@ class GearCheck(unittest.TestCase):
         self.assertTrue(all(5 <= e["guards"] <= 20 for e in ev[0]["evals"]))  # one camp per chest, not the whole template
         self.assertAlmostEqual(gearcheck.needed_ip(gearcheck.anchor_F(6), 6), gearcheck.par_ip(6), places=6)
         self.assertLess(gearcheck.par_ip(4), gearcheck.par_ip(6))
-        t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
+        t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False, calibrate=False)
         self.assertIn("Invisibility Potion", t)
         self.assertIn("Hardest pull", t)
 
@@ -132,7 +132,7 @@ class GearCheck(unittest.TestCase):
         self.assertIn("LIGHTNING_ARROW", [x[0] for x in combat.weapon_spells("T6_2H_BOW_KEEPER")["3"]])  # artifact's own E
 
     def test_dodge_and_defenses(self):
-        t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
+        t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False, calibrate=False)
         self.assertIn("@90% dodge", t)
         self.assertIn("@50% dodge", t)
         self.assertIn("caught heavy hit", t)
@@ -152,6 +152,17 @@ class GearCheck(unittest.TestCase):
         self.assertGreater(st["physicalarmor"], 108)             # mercenary jacket 108 at 700 IP, scaled up
         self.assertEqual(gearcheck.player_stats(e, rows, 2500)["hp"], 2500)  # in-game value overrides
 
+    def test_consumable_damage_and_calibration(self):
+        lo = json.loads(json.dumps(LOADOUT))
+        base = gearcheck.build_player(json.dumps(lo))["wf"]
+        lo.setdefault("inventory", []).append({"item": "T6_POTION_COOLDOWN", "quality": 1, "stack": 2})  # Poison Potion
+        self.assertGreater(gearcheck.build_player(json.dumps(lo))["wf"], base)
+        t = gearcheck.record_outcome(json.dumps(LOADOUT), "green", 6, "large", "легко", save=False)  # dry run, journal untouched
+        self.assertIn("model raw margin", t)
+        self.assertIn("easy", t)
+        with self.assertRaises(gearcheck.AOError):
+            gearcheck.record_outcome(json.dumps(LOADOUT), "green", 6, "large", "meh", save=False)
+
     def test_intents(self):
         self.assertEqual(gearcheck.parse_intents("Q W на урон"), {"1": "damage", "2": "damage"})
         _, e = gearcheck.parse_loadout(json.dumps({"equipment": [{"item": "T4_MAIN_NATURESTAFF_KEEPER@1"}]}))
@@ -169,9 +180,9 @@ class GroupCheck(unittest.TestCase):
 
     def test_group_beats_solo_and_composition_matters(self):
         bow, heal = "@" + os.path.join(self.EX, "bow_badon.json"), "@" + os.path.join(self.EX, "holy_healer.json")
-        duo = gearcheck.group_check([bow, bow], "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300", tiers=["6"], price=False)
+        duo = gearcheck.group_check([bow, bow], "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300", tiers=["6"], price=False, calibrate=False)
         trio = gearcheck.group_check([bow, bow, heal], "blue", ips="avg=1250,mainhand=1300 | avg=1250,mainhand=1300 | avg=1250",
-                                     tiers=["6"], price=False)
+                                     tiers=["6"], price=False, calibrate=False)
 
         def margin(t, chest="small"):  # margin @ default dodge for T6 <chest>
             row = next(l for l in t.splitlines() if l.startswith(f"| T6 | {chest} | "))

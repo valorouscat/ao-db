@@ -1,0 +1,134 @@
+{
+ "observations": [
+  {
+   "date": "2026-10-18",
+   "patch": "2026-10-12 Changelog: Dragonfire Patch 3",
+   "content": "green",
+   "tier": 6,
+   "stage": "large",
+   "outcome": "easy",
+   "loadouts": [
+    {
+     "version": 1,
+     "name": "лук",
+     "icon": 3,
+     "equipment": [
+      {
+       "item": "T6_2H_BOW_KEEPER@1",
+       "quality": 3,
+       "activeSpells": [
+        "MULTISHOT2",
+        "BURNINGARROWS",
+        "LIGHTNING_ARROW"
+       ],
+       "passiveSpells": [
+        "PASSIVE_ENERGYCHANCE_BOW"
+       ],
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T6_HEAD_LEATHER_SET2@1",
+       "quality": 3,
+       "activeSpells": [
+        "ENERGY_BARRIER"
+       ],
+       "passiveSpells": [
+        "PASSIVE_BALANCE"
+       ],
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T6_ARMOR_LEATHER_SET1@1",
+       "quality": 3,
+       "activeSpells": [
+        "BLOODLUST"
+       ],
+       "passiveSpells": [
+        "PASSIVE_ARMOR_BALANCE"
+       ],
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T6_SHOES_LEATHER_SET1@1",
+       "quality": 3,
+       "activeSpells": [
+        "SPRINT_CD_REDUCTION"
+       ],
+       "passiveSpells": [
+        "PASSIVE_BALANCE"
+       ],
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T5_BAG@1",
+       "quality": 3,
+       "passiveSpells": [
+        "PASSIVE_MAXLOAD"
+       ],
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T4_CAPEITEM_FW_THETFORD@2",
+       "quality": 3,
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T5_MOUNT_ARMORED_HORSE",
+       "quality": 2,
+       "pref": [
+        1,
+        1,
+        2
+       ]
+      },
+      {
+       "item": "T8_POTION_CLEANSE",
+       "quality": 1
+      },
+      {
+       "item": "T7_MEAL_ROAST",
+       "quality": 1,
+       "stack": 3
+      }
+     ],
+     "inventory": [
+      {
+       "item": "T6_POTION_COOLDOWN",
+       "quality": 1,
+       "stack": 3
+      }
+     ]
+    }
+   ],
+   "ips": "avg=1250,mainhand=1300",
+   "intents": null,
+   "min_hp": 0.4,
+   "consumables_used": "2x Poison Potion 6.0",
+   "notes": "Avalonian Knight ~13k HP; slow but easy, caught some damage, Bloodlust healed back"
+  }
+ ]
+}

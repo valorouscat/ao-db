@@ -520,6 +520,15 @@ def build_player(lo, ip_spec=None, intents=None):
         + mix.get("magic", 0) * (_st["magicspelldamagebonus"] + _st["magicattackdamagebonus"]) / 2
     wf *= (1 + bonus) / (1 + REF_DMG_BONUS)  # item damage bonuses, relative to the reference leather jacket
     kit_base = combat.kit_dps(weapon_e["id"], weapon_e["active"])[0] if weapon_e else combat.reference_kit_dps(3)
+    # damaging consumables (poison potions etc.): their DPS over the cooldown cycle joins the kit
+    for e in entries:
+        cs = core.item_json(e["id"]).get("@consumespell")
+        if cs and (e["row"]["slot"] in ("food", "potion") or e["inventory"]):
+            v = combat.spell_dps(cs, 3)
+            if v > 0:
+                kit_base += v
+                wf += v / combat.reference_kit_dps(3) * (1 + bonus) / (1 + REF_DMG_BONUS)
+                parts = list(parts) + [(f"{cs} (consumable)", v)]
     dfn = {"shield_ps": 0.0, "heal_self_ps": 0.0, "heal_ally_ps": 0.0, "heal_pct_ps": 0.0, "lifesteal": 0.0, "cc": [], "invuln_frac": 0.0,
            "sources": []}
     for e in entries:
@@ -610,8 +619,21 @@ def heavy_check(focus, evals):
     return (f"⚠ {pct:.0%} HP" if pct >= 0.6 else f"survives, {pct:.0%} HP") + f" ({name})"
 
 
-def _content_section(o, behaviour, tiers, want, gp, solo, players, dodge=DODGE, dodge_low=DODGE_LOW):
+def stage_margin(players, gp, stage, tier, dodge):
+    """(IP needed, defense adjustment, raw margin) — medians over the stage's template variants."""
+    needs, adj = [], []
+    for e in stage["evals"]:
+        m, _, _ = defense_multiplier(players, gp["focus"], e, dodge)
+        adj.append(100 * math.log(m / DEF_BASELINE) / PER100)
+        needs.append(needed_ip(e["F"], tier))
+    need, a = statistics.median(needs), statistics.median(adj)
+    return need, a, gp["ip"] + a - need
+
+
+def _content_section(o, behaviour, tiers, want, gp, solo, players, dodge=DODGE, dodge_low=DODGE_LOW, calibrate=True):
     focus = gp["focus"]
+    cal_info = calibration_offset() if calibrate else None
+    cal = cal_info["offset"] if cal_info else 0.0
     res, details, defs = [], [], []
     heavy_all = set()
     for t in tiers:
@@ -620,23 +642,16 @@ def _content_section(o, behaviour, tiers, want, gp, solo, players, dodge=DODGE, 
         for st in hi:
             if want is not None and st["stage"] not in want:
                 continue
-            row = []
-            for scen, stage in (("hi", st), ("lo", lo.get(st["stage"]))):
-                needs, adj = [], []
-                for e in stage["evals"]:
-                    m, cc, sus = defense_multiplier(players, focus, e, dodge if scen == "hi" else dodge_low)
-                    a = 100 * math.log(m / DEF_BASELINE) / PER100
-                    needs.append(needed_ip(e["F"], t))
-                    adj.append(a)
-                med_need = statistics.median(needs)
-                med_adj = statistics.median(adj)
-                row.append((med_need, med_adj, gp["ip"] + med_adj - med_need))
+            row = [stage_margin(players, gp, stage, t, dg) + (cal,)
+                   for stage, dg in ((st, dodge), (lo.get(st["stage"]), dodge_low))]
+            row = [(need, adj, m + cal, m) for need, adj, m, cal in row]
             worst = max(st["evals"], key=lambda e: e["F"])
             m, cc, sus = defense_multiplier(players, focus, worst, dodge)
             heavy_all.update(h[0] for h in worst["heavy"])
             stage_name = ["small", "medium", "large"][min(st["stage"], 2)]
-            res.append((f"T{t}", stage_name, f"{row[0][0]:.0f}", f"{gp['ip'] + row[0][1]:.0f}", f"{row[0][2]:+.0f}",
-                        _verdict_capped(row[0][2], focus["armor"], t), f"{row[1][2]:+.0f}", _verdict_capped(row[1][2], focus["armor"], t),
+            mtxt = lambda r: f"{r[2]:+.0f}" + (f" (raw {r[3]:+.0f})" if cal else "")
+            res.append((f"T{t}", stage_name, f"{row[0][0]:.0f}", f"{gp['ip'] + row[0][1]:.0f}", mtxt(row[0]),
+                        _verdict_capped(row[0][2], focus["armor"], t), mtxt(row[1]), _verdict_capped(row[1][2], focus["armor"], t),
                         heavy_check(focus, st["evals"])))
             pull = Counter(g["name"] for g in worst["pull"])
             details.append((f"T{t}", stage_name, ", ".join(f"{n}× {m_}" for m_, n in pull.most_common(4)), f"{worst['hp']:,.0f}",
@@ -646,6 +661,10 @@ def _content_section(o, behaviour, tiers, want, gp, solo, players, dodge=DODGE, 
                          f"margin @{dodge_low:.0%} dodge", "verdict", "caught heavy hit"]))
     o.append("\n**Hardest pull (worst variant) and your defenses there**\n" +
              table(details, ["tier", "chest", "mobs in the pull", "pull HP", f"pull DPS @{dodge:.0%} dodge", "defense multiplier"]))
+    if cal_info:
+        o.append(f"_Margins calibrated on **{cal_info['n']}** real outcome(s) from `knowledge/calibration.json`: offset "
+                 f"{cal:+.0f} IP (residual spread ±{cal_info['spread']:.0f}); 'raw' = uncalibrated model. "
+                 + ("Low confidence — record more outcomes with `record_outcome`." if cal_info["n"] < 3 else "") + "_")
     if heavy_all:
         o.append("**Telegraphed heavy hits (assumed dodged in the margins):** " + ", ".join(f"`{h}`" for h in sorted(heavy_all)[:10]))
 
@@ -678,7 +697,7 @@ MODEL_NOTE = ("_Dodging: telegraphed mob abilities (ground/area with wind-up) ar
               "50%); instant targeted abilities and auto-attacks always hit; heavy telegraphed hits are excluded from the margins and checked "
               "separately ('caught heavy hit', no shield up). Defenses from the player's own spells/consumables (spells.json): shields, "
               "self/ally heals, lifesteal, CC uptime on the pull, invulnerability/invisibility, kiting melee mobs with a ranged weapon; "
-              "relative to a typical kit (×1.3); CC ≤25% per spell / 35% per group, incoming never below 35%. Player HP is estimated (1800 at 1000 armor IP, plate ×1.15, cloth ×0.9)._\n"
+              "relative to a typical kit (×1.3); CC ≤25% per spell / 35% per group, incoming never below 35%. Player HP/armor/resistances come from the items (1200 base + armor HP share, scaled by IP; pass in-game `hp` to override); damaging consumables (e.g. poison potions) add their DPS over the cooldown. Margins are shifted by the calibration offset from real outcomes (`record_outcome` / `calibration`)._\n"
               "_Model: weapon factor = DPS potential of the chosen spells + auto-attacks vs a 3-mob pull (spells.json effects) ÷ median "
               "best kit of all weapons; damage = Σ role share × weapon factor × 1.0918^((weapon IP−1000)/100) × (1 − 7.5% per extra player); "
               "survivability = 1.0918^((armor IP−1000)/100) × role/healer/aggro factors. Content: concrete guards of every template "
@@ -689,7 +708,7 @@ MODEL_NOTE = ("_Dodging: telegraphed mob abilities (ground/area with wind-up) ar
 
 # ------------------------------------------------------------------ tools
 def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, weapon_ip=None, slot_ip=None, avg_ip=None,
-               intents=None, hp=None, dodge=DODGE, dodge_low=DODGE_LOW, server="europe", city="Caerleon", price=True):
+               intents=None, hp=None, dodge=DODGE, dodge_low=DODGE_LOW, server="europe", city="Caerleon", price=True, calibrate=True):
     key = content if content in CONTENT else next((v for a, v in ALIASES.items() if a in (content or "").lower()), None)
     if not key:
         raise AOError(f"Unknown content {content!r}. Supported: {', '.join(CONTENT)} (aliases: green/blue/gold).")
@@ -722,7 +741,7 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
             warn.append(f"`{e['id']}` is actually **{e['row']['name_en']}** (legacy item ID)")
     if warn:
         o.append("⚠ " + "; ".join(warn))
-    _content_section(o, behaviour, tiers, want, gp, True, [p], dodge, dodge_low)
+    _content_section(o, behaviour, tiers, want, gp, True, [p], dodge, dodge_low, calibrate)
     if price:
         _risk(o, [p], server, city)
     o.append("\n" + MODEL_NOTE)
@@ -748,7 +767,7 @@ def _risk(o, players, server, city):
 
 
 def group_check(loadouts, content="avalon_veteran", ips=None, intents=None, tiers=None, stages=None, dodge=DODGE, dodge_low=DODGE_LOW,
-                server="europe", city="Caerleon", price=True):
+                server="europe", city="Caerleon", price=True, calibrate=True):
     """Predict how a 2-3 player group performs in PvE camps (concrete guards of the content, kit-based weapon factors)."""
     if isinstance(loadouts, str):
         loadouts = [loadouts]
@@ -781,7 +800,7 @@ def group_check(loadouts, content="avalon_veteran", ips=None, intents=None, tier
     o.append(f"\n**Group power** ≈ one player at **{gp['ip']:.0f} IP** (damage ×{gp['dmg']:.2f} incl. coordination "
              f"−{COORDINATION * (len(players) - 1):.0%}, focused target `{gp['focus']['name']}` survivability ×{gp['surv']:.2f}; "
              f"group damage type " + " / ".join(f"{k} {v:.0%}" for k, v in gp["mix"].items() if v >= 0.05) + ")")
-    _content_section(o, behaviour, tiers, want, gp, len(players) == 1, players, dodge, dodge_low)
+    _content_section(o, behaviour, tiers, want, gp, len(players) == 1, players, dodge, dodge_low, calibrate)
     if not intent_size[0] <= len(players) <= intent_size[1]:
         o.append(f"⚠ Content intended for {intent_size[0]}–{intent_size[1]} players; with {len(players)} the "
                  + ("loot is split between more people" if len(players) > intent_size[1] else "camp is tuned for a bigger group"))
@@ -794,3 +813,122 @@ def group_check(loadouts, content="avalon_veteran", ips=None, intents=None, tier
         _risk(o, players, server, city)
     o.append("\n" + MODEL_NOTE)
     return "\n".join(o)
+
+
+# ------------------------------------------------------------------ calibration on real outcomes
+CALIBRATION_FILE = __import__("pathlib").Path(core.ROOT) / "knowledge" / "calibration.json"
+OUTCOME_MARGIN = {  # target margin @default dodge for a reported outcome (mid-points of the verdict bands)
+    "easy": 50, "doable": -100, "hard": -300, "failed": -500}
+OUTCOME_ALIASES = {"легко": "easy", "просто": "easy", "comfortable": "easy", "ok": "doable", "норм": "doable", "сложно": "hard",
+                   "тяжело": "hard", "fail": "failed", "died": "failed", "умер": "failed", "провал": "failed"}
+CAL_CAP = 400
+
+
+def _cal_load():
+    try:
+        return json.loads(CALIBRATION_FILE.read_text(encoding="utf-8")).get("observations", [])
+    except FileNotFoundError:
+        return []
+
+
+def _norm_outcome(outcome):
+    o = str(outcome or "").strip().lower()
+    o = OUTCOME_ALIASES.get(o, o)
+    if o not in OUTCOME_MARGIN:
+        raise AOError(f"outcome must be one of {', '.join(OUTCOME_MARGIN)} (got {outcome!r})")
+    return o
+
+
+def observation_margin(obs):
+    """Uncalibrated model margin (@ the default dodge) for a recorded outcome, recomputed with the current model and data."""
+    key = obs["content"] if obs["content"] in CONTENT else next(v for a, v in ALIASES.items() if a in obs["content"].lower())
+    behaviour = CONTENT[key][0]
+    per_ip = _parse_ips(obs.get("ips"), len(obs["loadouts"]))
+    ints = obs.get("intents") or []
+    players = [build_player(lo, per_ip[i], ints[i] if i < len(ints) else None) for i, lo in enumerate(obs["loadouts"])]
+    gp = group_power(players)
+    stage_i = STAGE_NAMES.get(str(obs["stage"]).lower(), obs["stage"])
+    st = next((s for s in content_eval(behaviour, int(obs["tier"]), gp["mix"], len(players) == 1, DODGE, gp["focus"]["ranged"])
+               if s["stage"] == stage_i), None)
+    if not st:
+        raise AOError(f"No {obs['stage']} stage at T{obs['tier']} for {behaviour}")
+    return stage_margin(players, gp, st, int(obs["tier"]), DODGE)[2]
+
+
+_cal_cache = {}
+
+
+def calibration_offset():
+    """Mean (target − model) margin over the journal, capped at ±400 IP; None when the journal is empty."""
+    if "v" not in _cal_cache:
+        res = []
+        for obs in _cal_load():
+            try:
+                res.append(OUTCOME_MARGIN[_norm_outcome(obs["outcome"])] - observation_margin(obs))
+            except (AOError, KeyError, StopIteration):
+                continue
+        if not res:
+            _cal_cache["v"] = None
+        else:
+            off = max(-CAL_CAP, min(CAL_CAP, statistics.mean(res)))
+            _cal_cache["v"] = {"offset": off, "n": len(res), "spread": statistics.pstdev(res) if len(res) > 1 else 0.0}
+    return _cal_cache["v"]
+
+
+def record_outcome(loadouts, content, tier, stage, outcome, ips=None, intents=None, min_hp=None, consumables_used=None, notes=None,
+                   date=None, save=True):
+    """Add a real fight outcome to the calibration journal; returns the model's raw margin for it and the new offset."""
+    if isinstance(loadouts, (str, dict)):
+        loadouts = [loadouts]
+    los = []
+    for lo in loadouts:
+        if isinstance(lo, str):
+            s_ = lo.strip()
+            lo = json.loads(open(s_[1:], encoding="utf-8").read() if s_.startswith("@") else s_)
+        los.append(lo)
+    obs = {"date": date or __import__("datetime").date.today().isoformat(), "patch": None, "content": content, "tier": int(tier),
+           "stage": stage, "outcome": _norm_outcome(outcome), "loadouts": los,
+           "ips": ips if isinstance(ips, list) or ips is None else str(ips),
+           "intents": (intents if isinstance(intents, list) else str(intents).split("|")) if intents else None,
+           "min_hp": min_hp, "consumables_used": consumables_used, "notes": notes}
+    try:
+        from . import patchnotes
+        d_, t_ = patchnotes.current_patch()
+        obs["patch"] = f"{d_} {t_}" if d_ else None
+    except Exception:
+        pass
+    raw = observation_margin(obs)
+    if save:
+        data = _cal_load() + [obs]
+        CALIBRATION_FILE.write_text(json.dumps({"observations": data}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        _cal_cache.clear()
+    cal = calibration_offset() if save else None
+    target = OUTCOME_MARGIN[obs["outcome"]]
+    out = [f"## Outcome {'recorded' if save else '(dry run)'}: T{obs['tier']} {stage} {content} → **{obs['outcome']}**",
+           f"- model raw margin: **{raw:+.0f}** ({_verdict(raw)}) · target for '{obs['outcome']}': {target:+d} · error {target - raw:+.0f} IP"]
+    if cal:
+        out.append(f"- calibration offset now **{cal['offset']:+.0f} IP** over {cal['n']} outcome(s) (spread ±{cal['spread']:.0f})")
+    return "\n".join(out)
+
+
+def calibration():
+    """The calibration journal: each real outcome vs the current model."""
+    obs = _cal_load()
+    if not obs:
+        return "Calibration journal is empty (`record_outcome` adds real fight results)."
+    rows = []
+    for i, ob in enumerate(obs):
+        try:
+            raw = observation_margin(ob)
+            tgt = OUTCOME_MARGIN[_norm_outcome(ob["outcome"])]
+            r = (f"{raw:+.0f}", f"{tgt:+d}", f"{tgt - raw:+.0f}")
+        except (AOError, KeyError, StopIteration) as e:
+            r = ("—", "—", f"error: {e}")
+        names = ", ".join(lo.get("name", "?") for lo in ob["loadouts"])
+        rows.append((i + 1, ob.get("date", ""), ob.get("patch") or "", names, ob.get("ips") or "", f"{ob['content']} T{ob['tier']} {ob['stage']}",
+                     ob["outcome"], f"{ob['min_hp']:.0%}" if isinstance(ob.get("min_hp"), (int, float)) else "", *r, ob.get("notes") or ""))
+    cal = calibration_offset()
+    return ("## Calibration journal\n" + table(rows, ["#", "date", "patch", "loadouts", "IP", "content", "outcome", "min HP", "model raw",
+                                                      "target", "error", "notes"]) +
+            (f"\n\nOffset applied to gear_check/group_check margins: **{cal['offset']:+.0f} IP** (mean error, cap ±{CAL_CAP}; "
+             f"n={cal['n']}, spread ±{cal['spread']:.0f})." if cal else ""))

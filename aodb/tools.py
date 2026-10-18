@@ -98,7 +98,8 @@ TOOLS = [
                      hp=P(N, "Character max health from the game (replaces the estimate: 1200 base + items)"),
                      dodge=P(N, "Share of telegraphed (ground/area) mob ability damage dodged", 0.9),
                      dodge_low=P(N, "Pessimistic dodge share shown as a second scenario", 0.5), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
-                     city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True))),
+                     city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True),
+                     calibrate=P(B, "Shift margins by the calibration offset from real outcomes (knowledge/calibration.json)", True))),
     dict(name="group_check", fn=gearcheck.group_check,
          desc="Predict how a small group (2-3, up to 5) performs in PvE camps, built on the concrete monsters of the content: every "
               "template variant, guards per chest stage clustered into pulls by position, each mob's HP, auto-attack + ability DPS and "
@@ -113,7 +114,22 @@ TOOLS = [
                      dodge_low=P(N, "Pessimistic dodge share shown as a second scenario", 0.5),
                      tiers=P(A, "Content tiers, e.g. ['4','6','8']"), stages=P(A, "Chest stages: small, medium, large"),
                      server=P(S, "Market server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
-                     price=P(B, "Look up re-gear cost", True))),
+                     price=P(B, "Look up re-gear cost", True),
+                     calibrate=P(B, "Shift margins by the calibration offset from real outcomes (knowledge/calibration.json)", True))),
+    dict(name="record_outcome", fn=gearcheck.record_outcome,
+         desc="Record a REAL fight result (loadouts, IP, content/tier/chest stage, outcome) in the calibration journal "
+              "knowledge/calibration.json; gear_check/group_check shift their margins by the mean model error over the journal. "
+              "Use when the user reports how a run actually went. Commit the journal afterwards.",
+         params=dict(loadouts=P(A, "One loadout JSON (or @file) per player", required=True),
+                     content=P(S, "avalon_solo (green), avalon_veteran (blue), avalon_elite (gold)", required=True),
+                     tier=P(I, "Content tier", required=True), stage=P(S, "Chest stage: small, medium, large", required=True),
+                     outcome=P(S, "How it went", required=True, enum=list(gearcheck.OUTCOME_MARGIN)),
+                     ips=P(S, "In-game IP per player as in group_check: 'avg=1250,mainhand=1300 | avg=1180'"),
+                     intents=P(S, "Spell intents per player separated by '|'"), min_hp=P(N, "Lowest HP share during the fight, 0-1"),
+                     consumables_used=P(S, "Consumables used, e.g. '2x T6 poison potion'"), notes=P(S, "Free-text notes"),
+                     save=P(B, "Write to the journal (false = dry run)", True))),
+    dict(name="calibration", fn=gearcheck.calibration,
+         desc="Calibration journal: every recorded real outcome vs the current model's raw margin, and the offset applied.", params={}),
     dict(name="chest_value", fn=advisor.chest_value,
          desc="Expected loot value of chests (Avalon roads, corrupted dungeons, hellgates, mists, static dungeons, treasure...) computed "
               "through the loot tables; ranks chests so you can tell which are worth opening.",
