@@ -85,7 +85,7 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 ./ao chest-value avaroadloot --tier 8 --live
 ./ao build-cost T8_2H_BOW T8_HEAD_LEATHER_SET1 T8_ARMOR_LEATHER_SET1 T8_SHOES_LEATHER_SET1 T8_CAPEITEM_FW_MARTLOCK "10x T8_MEAL_STEW"
 ./ao meta-builds --weapon "T8 bow" --pages 20
-./ao gear-check @my_loadout.json --content green --spec-ip 150
+./ao gear-check @my_loadout.json --content green --weapon-ip 1300
 ./ao mechanics corrupted
 ./ao patchnotes "roads of avalon chests"
 ./ao patchnotes broadsword --since 2026-01-01

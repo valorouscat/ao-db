@@ -1,7 +1,8 @@
 """Can this loadout farm that PvE content? Loadout analysis + camp strength model from the game files.
 
 Model (transparent, documented in the output):
-- Player power: average item power of the 6 combat slots (2H weapon counts twice) + quality bonus + optional spec IP.
+- Player power: weapon IP (damage) and head/armor/shoes IP (survivability), incl. quality bonus, mastery (weapon_ip) and
+  optional spec IP; the fight model uses their mean. The game's average IP (6 slots, 2H counted twice) is shown too.
 - Per +100 IP the game scales weapon damage ×1.0918 and survivability ×≈1.0918 (HP ×1.06 · armor ×1.03), so a fight's
   balance (enemy HP × enemy DPS vs player DPS × player EHP) shifts by ×1.192 per 100 IP (gamedata.json ItemPowerProgression).
 - Content strength: guards of the camp at each chest stage (templates + randomspawnbehaviors + mobs). The base stage of a
@@ -55,13 +56,16 @@ def parse_loadout(loadout):
     return loadout.get("name") or "loadout", entries
 
 
-def loadout_ip(entries, spec_ip=0):
+def loadout_ip(entries, spec_ip=0, weapon_ip=None):
+    """Average IP of combat slots; weapon_ip = in-game weapon IP incl. mastery (replaces the computed main-hand value)."""
     total, n, rows = 0.0, 0, []
     for e in entries:
         it, slot = e["row"], e["row"]["slot"]
         if e["inventory"] or slot not in COMBAT_SLOTS or not it["itempower"]:
             continue
         ip = it["itempower"] + QUALITY_IP.get(e["quality"], 0)
+        if slot == "mainhand" and weapon_ip:
+            ip = weapon_ip
         w = 2 if slot == "mainhand" and core.item_json(e["id"]).get("@twohanded") == "true" else 1
         total += ip * w
         n += w
@@ -69,6 +73,16 @@ def loadout_ip(entries, spec_ip=0):
     if not n:
         raise AOError("No combat items (weapon/armor/cape) in the loadout")
     return total / n + spec_ip, rows
+
+
+def model_ip(rows, spec_ip=0):
+    """IP the fight model uses: damage scales with the weapon (main/off hand), survivability with head/armor/shoes,
+    so the balance point is the mean of the two (both progress ×1.0918 per 100 IP in gamedata.json)."""
+    off = [ip for slot, ip, _ in rows if slot in ("mainhand", "offhand")]
+    deff = [ip for slot, ip, _ in rows if slot in ("head", "armor", "shoes")]
+    if not off or not deff:
+        return None
+    return (sum(off) / len(off) + sum(deff) / len(deff)) / 2 + spec_ip
 
 
 def kit(entries):
@@ -167,7 +181,7 @@ def _verdict(margin):
 
 
 # ------------------------------------------------------------------ tool
-def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, server="europe", city="Caerleon", price=True):
+def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=0, weapon_ip=None, server="europe", city="Caerleon", price=True):
     name, entries = parse_loadout(loadout)
     key = content if content in CONTENT else next((v for a, v in ALIASES.items() if a in (content or "").lower()), None)
     if not key:
@@ -177,7 +191,8 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
     want = None
     if stages:
         want = {STAGE_NAMES.get(str(s).lower(), s) for s in stages}
-    avg_ip, slot_ips = loadout_ip(entries, spec_ip)
+    avg_ip, slot_ips = loadout_ip(entries, spec_ip, weapon_ip)
+    fight_ip = model_ip(slot_ips, spec_ip) or avg_ip
     flags, spells = kit(entries)
     prof = content_profile(behaviour, tiers)
 
@@ -190,8 +205,10 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
                      core.QUALITY_NAMES.get(e["quality"], e["quality"]), (it["itempower"] or 0) + QUALITY_IP.get(e["quality"], 0) if it["itempower"] else "",
                      ", ".join(e["active"] + e["passive"]) + (f" ×{e['stack']}" if e["stack"] > 1 else "") + (" (bag)" if e["inventory"] else "")))
     o.append(table(rows, ["slot", "item", "quality", "IP", "spells / stack"]))
-    o.append(f"\n**Average item power: {avg_ip - spec_ip:.0f}**" + (f" + spec {spec_ip} = **{avg_ip:.0f}**" if spec_ip else
-                                                                   " (without mastery/spec: pass spec_ip, e.g. 100–300)"))
+    o.append(f"\n**Average item power: {avg_ip - spec_ip:.0f}**" + (f" (weapon at {weapon_ip} incl. mastery)" if weapon_ip else "") +
+             (f" + spec {spec_ip} = **{avg_ip:.0f}**" if spec_ip else
+              "" if weapon_ip else " (without mastery/spec: pass weapon_ip from the game, or spec_ip, e.g. 100–300)") +
+             f"\nModel IP (mean of weapon IP → damage and head/armor/shoes IP → survivability): **{fight_ip:.0f}**")
     # kit
     o.append("\n### Kit\n" + table([(f, ", ".join(dict.fromkeys(v)) or "—") for f, v in flags.items()], ["capability", "from"]))
     warn = []
@@ -224,7 +241,7 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
         par = 700 + 100 * (p["tier"] - 4)
         extra = 100 * math.log(p["F"] / base[p["tier"]]) / PER100 if base.get(p["tier"]) and p["F"] else 0
         need = par + extra
-        margin = avg_ip - need
+        margin = fight_ip - need
         strongest = max(p["guards"], key=lambda g: g["hp"] * g["dps"]) if p["guards"] else None
         res.append((f"T{p['tier']}", ["small", "medium", "large"][p["stage"]] if p["stage"] < 3 else p["stage"], len(p["guards"]),
                     f"{sum(g['hp'] for g in p['guards']):,.0f}", f"{sum(g['dps'] for g in p['guards']):,.0f}",
@@ -255,6 +272,6 @@ def gear_check(loadout, content="avalon_solo", tiers=None, stages=None, spec_ip=
             o.append(f"\n### Risk\nPrice lookup failed ({e}); run build_cost later.")
     o.append("\n_Model: base stage of a tier-T camp ≈ tuned for T.0 gear (IP 700 + 100·(T−4)); each larger chest stage needs extra IP "
              "= 100·ln(F_stage/F_base)/ln(1.192), F = HP×DPS of the hardest pull (boss slot or 3 strongest guards); "
-             "+100 IP ≈ ×1.0918 damage and ×1.0918 survivability (gamedata.json). Ignores player skill, spec, resistances, mechanics, "
+             "+100 IP ≈ ×1.0918 damage (weapon) and ×1.0918 survivability (armor) (gamedata.json); model IP = mean of weapon and armor IP. Ignores player skill, spec, resistances, mechanics, "
              "and PvP risk — use it to compare options, not as a guarantee._")
     return "\n".join(o)
