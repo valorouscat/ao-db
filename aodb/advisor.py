@@ -231,8 +231,9 @@ def build_cost(items, server="europe", city="Caerleon", quality=1, compare_encha
                 if p is None:
                     unknown += 1
                 s += (p or 0) * n
-            cols.append((f".{e}", money(s), unknown or ""))
-        o.append("\n### Same build at other enchantments\n" + table(cols, ["enchant", "total", "items w/o price"]))
+            cols.append((f".{e}", ("≥ " if unknown else "") + money(s), unknown or ""))
+        o.append("\n### Same build at other enchantments\n" + table(cols, ["enchant", "total", "items w/o price"]) +
+                 "\n_Consumables stay as listed; '≥' = some items had no price, so the total is a lower bound._")
     if market.WARNINGS:
         o.append("\n⚠ " + "; ".join(market.WARNINGS))
     o.append("\n_Prices: albion-online-data.com (crowd-sourced). Re-gear cost = this total minus items you keep on death (none in full-loot zones)._")

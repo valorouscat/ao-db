@@ -1,5 +1,6 @@
 """Live market data from the Albion Online Data Project (albion-online-data.com, crowd-sourced)."""
 import hashlib, json, os, time, urllib.error, urllib.parse, urllib.request
+from collections import defaultdict
 from .core import AOError, label, money, fmt, table, resolve_item, recipes_of, returnable, item_value
 
 API = "https://{srv}.albion-online-data.com/api/v2/stats/{kind}/{ids}.json"
@@ -51,6 +52,15 @@ def _get(kind, ids, server, **params):
     except OSError:
         pass
     return data
+
+
+def _hours(ts):
+    if not ts or ts.startswith("0001"):
+        return None
+    try:
+        return (time.time() - time.mktime(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) + time.timezone) / 3600
+    except ValueError:
+        return None
 
 
 def _ago(ts):
@@ -211,15 +221,31 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
         except AOError as e:
             WARNINGS.append(f"history: {e}")
             break
+    # cross-city median of fresh listings: fills gaps and catches single overpriced listings
+    xcity = defaultdict(list)
+    for i in range(0, len(ids), 80) if not WARNINGS else ():
+        try:
+            for d in _get("prices", ids[i:i + 80], server, qualities=quality):
+                age = _hours(d["sell_price_min_date"])
+                if d["sell_price_min"] and d["city"] != "Black Market" and age is not None and age < 24 * days:
+                    xcity[d["item_id"]].append(d["sell_price_min"])
+        except AOError as e:
+            WARNINGS.append(f"cross-city: {e}")
+            break
     out = {}
     for i in ids:
         lv, hv = live.get(i), hist.get(i)
-        if lv and hv and hv[0] and lv[0] > hv[0] * 1.25:
-            out[i] = (hv[0], f"{days}d avg (live {money(lv[0])} inflated)")
+        xs = sorted(xcity.get(i, []))
+        med = xs[len(xs) // 2] if xs else None
+        ref = hv[0] if hv and hv[0] else med
+        if lv and ref and lv[0] > ref * 1.25:
+            out[i] = (ref, f"{'%dd avg' % days if hv and hv[0] else 'median of %d cities' % len(xs)} (live {money(lv[0])} inflated)")
         elif lv:
             out[i] = (lv[0], f"live {_ago(lv[1])}")
         elif hv and hv[0]:
             out[i] = (hv[0], f"{days}d avg")
+        elif med:
+            out[i] = (med, f"median of {len(xs)} other cities")
         else:
             out[i] = (None, "no data")
     return out
