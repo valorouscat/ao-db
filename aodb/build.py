@@ -5,6 +5,7 @@ Usage: python3 -m aodb.build [--repo PATH] [--db PATH] [--regions]
 """
 import argparse, json, os, re, sqlite3, sys, time, glob
 
+SCHEMA_VERSION = "3"  # bump when tables/indexes change: core.info and the SessionStart hook then ask for a rebuild
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
 LANGS = ["EN-US", "RU-RU", "DE-DE", "FR-FR", "PL-PL", "ES-ES", "PT-BR", "IT-IT",
          "ZH-CN", "KO-KR", "JA-JP", "ZH-TW", "ID-ID", "TR-TR", "AR-SA"]
@@ -19,6 +20,7 @@ CREATE TABLE items(id TEXT PRIMARY KEY, base_id TEXT, enchant INT, kind TEXT, ti
   shopcat TEXT, sub1 TEXT, sub2 TEXT, sub3 TEXT, slot TEXT, itempower INT, weight REAL,
   itemvalue REAL, craftcat TEXT, json TEXT);
 CREATE INDEX items_base ON items(base_id);
+CREATE INDEX items_tier ON items(tier, slot);
 CREATE VIRTUAL TABLE items_fts USING fts5(id, name_en, name_ru, desc_en, desc_ru, tags, tokenize='unicode61 remove_diacritics 2');
 
 CREATE TABLE recipes(item_id TEXT, recipe_no INT, silver REAL, time REAL, focus REAL, amount INT,
@@ -39,6 +41,7 @@ CREATE TABLE mobs(id TEXT PRIMARY KEY, name_en TEXT, name_ru TEXT, tier INT, cat
 CREATE VIRTUAL TABLE mobs_fts USING fts5(id, name_en, name_ru, faction, category, tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE mob_loot(mob_id TEXT, lootlist TEXT, chance REAL);
 CREATE INDEX mob_loot_list ON mob_loot(lootlist);
+CREATE INDEX mob_loot_mob ON mob_loot(mob_id);
 
 CREATE TABLE loot(list TEXT, kind TEXT, target TEXT, amount TEXT, chance REAL, extra TEXT);
 CREATE INDEX loot_list ON loot(list);
@@ -47,6 +50,7 @@ CREATE INDEX loot_target ON loot(target);
 CREATE TABLE loot_raw(name TEXT PRIMARY KEY, json TEXT);
 CREATE TABLE chests(name TEXT PRIMARY KEY, chesttype TEXT, faction TEXT, json TEXT);
 CREATE TABLE modifiers(source TEXT, grp TEXT, level TEXT, mobbuff TEXT, loot REAL, silver REAL, fame REAL, extra TEXT);
+CREATE INDEX modifiers_src ON modifiers(source, grp);
 CREATE TABLE spawnbehaviors(name TEXT PRIMARY KEY, faction TEXT, mobs TEXT);
 CREATE TABLE chest_upgrades(name TEXT PRIMARY KEY, marker TEXT, stages TEXT, json TEXT);
 CREATE TABLE camps(template TEXT, layer TEXT, chest_tile TEXT, chest_behaviour TEXT, spawns TEXT, guards TEXT);
@@ -56,6 +60,8 @@ CREATE VIRTUAL TABLE clusters_fts USING fts5(idx, name, file, tokenize='unicode6
 
 CREATE TABLE docs(id INTEGER PRIMARY KEY, file TEXT, path TEXT, key TEXT, json TEXT);
 CREATE VIRTUAL TABLE docs_fts USING fts5(file, key, text, tokenize='unicode61 remove_diacritics 2');
+-- derived game structures (camps, spawn behaviours, chest stages, chests, content modifiers) for search
+CREATE VIRTUAL TABLE structs_fts USING fts5(kind, key, title, text, tokenize='unicode61 remove_diacritics 2');
 """
 
 
@@ -393,6 +399,32 @@ class Builder:
         self.db.executemany("INSERT INTO camps VALUES(?,?,?,?,?,?)", camps)
         self.log("spawnbehaviors", len(rows), "chest upgrades", len(up), "camps", len(camps))
 
+    # ---------------------------------------------------------------- derived structures index
+    def build_structs(self):
+        """One searchable row per camp layout / spawn behaviour / chest stage set / chest / modifier group, with mob names."""
+        names = dict(self.db.execute("SELECT id, COALESCE(name_en, '') || ' ' || COALESCE(name_ru, '') FROM mobs"))
+        spawn = {n: json.loads(m) for n, m in self.db.execute("SELECT name, mobs FROM spawnbehaviors")}
+        mob_names = lambda beh: " ".join(dict.fromkeys(names.get(m["mob"], m["mob"] or "") for m in spawn.get(beh, [])))
+        rows = []
+        for n, fac in self.db.execute("SELECT name, faction FROM spawnbehaviors"):
+            rows.append(("spawn", n, fac or "", " ".join(m["mob"] or "" for m in spawn[n]) + " " + mob_names(n)))
+        camps = {}
+        for tpl, layer, tile, beh, guards in self.db.execute("SELECT template, layer, chest_tile, chest_behaviour, guards FROM camps"):
+            c = camps.setdefault((tpl, layer), {"chests": set(), "guards": set()})
+            c["chests"].add(beh or tile)
+            c["guards"].update(g[0] for g in json.loads(guards))
+        for (tpl, layer), c in camps.items():
+            rows.append(("camp", f"{tpl} › {layer.strip()}", " ".join(sorted(x for x in c["chests"] if x)),
+                         " ".join(sorted(c["guards"])) + " " + " ".join(mob_names(b) for b in sorted(c["guards"]))))
+        for n, stages in self.db.execute("SELECT name, stages FROM chest_upgrades"):
+            rows.append(("chest stages", n, "", " ".join(x["chest"] or "" for x in json.loads(stages))))
+        for n, ct, fac in self.db.execute("SELECT name, chesttype, faction FROM chests"):
+            rows.append(("chest", n, ct or "", fac or ""))
+        for src, grp, lv in self.db.execute("SELECT source, grp, group_concat(level, ' ') FROM modifiers GROUP BY source, grp"):
+            rows.append(("modifier", f"{src} / {grp}", src, f"{grp} levels {lv}"))
+        self.db.executemany("INSERT INTO structs_fts VALUES(?,?,?,?)", rows)
+        self.log("structs", len(rows))
+
     # ---------------------------------------------------------------- clusters
     def build_clusters(self):
         world = load(self.repo, "formatted/world.json")
@@ -504,11 +536,17 @@ class Builder:
         self.build_camps()
         self.build_clusters()
         self.build_docs()
+        self.build_structs()
         g = load(self.repo, "gamedata.json")["AO-GameData"]["Items"]
         self.db.execute("INSERT INTO meta VALUES(?,?)", ("itempowerprogression", json.dumps(g, ensure_ascii=False)))
         rev = os.popen(f"git -C '{self.repo}' log -1 --format='%h %cs %s' 2>/dev/null").read().strip()
-        self.db.executemany("INSERT INTO meta VALUES(?,?)", [("built", time.strftime("%Y-%m-%d %H:%M")), ("repo_rev", rev)])
+        self.db.executemany("INSERT INTO meta VALUES(?,?)", [("built", time.strftime("%Y-%m-%d %H:%M")), ("repo_rev", rev),
+                                                                ("schema", SCHEMA_VERSION)])
+        self.db.execute("CREATE INDEX docs_file_key ON docs(file, key)")  # covering: file/key lookups skip the big json column
+        for ft in ("loc_fts", "items_fts", "spells_fts", "mobs_fts", "clusters_fts", "docs_fts", "structs_fts"):
+            self.db.execute(f"INSERT INTO {ft}({ft}) VALUES('optimize')")  # merge FTS segments into one b-tree
         self.db.commit()
+        self.db.execute("ANALYZE")  # planner statistics
         self.db.execute("VACUUM")
         self.db.close()
         os.replace(self.tmppath, self.dbpath)

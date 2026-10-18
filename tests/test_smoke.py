@@ -205,6 +205,20 @@ class PatchNotes(unittest.TestCase):
     def test_cards_show_recent_changes(self):
         self.assertIn("Recent patch changes", core.item("T8_MAIN_SWORD"))
 
+    def test_unified_knowledge_index(self):
+        t = core.search("avalon knight", types=["structs", "knowledge"])
+        self.assertIn("Game structures", t)
+        self.assertIn("AVALON", t)
+        self.assertIn("Knowledge", core.search("bloodlust", types=["knowledge"]))
+        sig = patchnotes._signature()
+        with tempfile.NamedTemporaryFile("w", suffix=".md", dir=patchnotes.KNOWLEDGE_DIR, delete=False) as f:
+            f.write("# zzqx test note\n")
+        try:
+            self.assertNotEqual(patchnotes._signature(), sig)  # a new note invalidates knowledge.db
+        finally:
+            os.remove(f.name)
+        self.assertEqual(patchnotes._signature(), sig)
+
     def test_bbcode(self):
         md = patchnotes.bbcode_to_md("[h3]Title[/h3][b]Bold[/b][list][*]A[list][*]B[/*][/list][/*][/list][url=https://x.y]link[/url]")
         self.assertIn("### Title", md)

@@ -20,7 +20,7 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
 - Session start updates dumps and patch notes automatically; mid-session use `update_patchnotes` if a new patch dropped.
 
 ## A. Factual questions
-`search` → entity tool (`item`, `spell`, `mob`, `zone`, `variants`, `recipe`, `usedin`, `drops`, `loot`) → `doc` / `sql` for details.
+`search` (also finds camps/spawns/chest stages and curated notes, the real-outcome journal, patch notes) → entity tool (`item`, `spell`, `mob`, `zone`, `variants`, `recipe`, `usedin`, `drops`, `loot`) → `doc` / `sql` for details.
 
 ## B. General / strategy questions (grounded answer protocol)
 1. **Frame it.** Pin down content type, zone (lethal or not), tier/IP target, solo/group, server, budget. If unstated,

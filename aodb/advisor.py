@@ -58,13 +58,28 @@ class LootEV:
             if t:
                 acc[_item_id(t, int(core.num(node.get("@enchantmentlevel")) or 0))] += mult * _amount(node)
         elif key in ("LootListReference", "LootList"):
-            sub = self.raw(node.get("@name"))
-            if sub:
-                self.all_of(sub, mult, acc, depth + 1)
+            for iid, n in self.unit(node.get("@name"), depth + 1).items():  # memoized: E[list] is linear in mult
+                acc[iid] += mult * n
         elif key == "OR":
             self.one_of(node, mult, acc, depth + 1)
         elif key == "AND":
             self.all_of(node, mult, acc, depth + 1)
+
+    _units, _busy = {}, set()  # expected items of each loot list per 1 roll (static game data: shared by all instances)
+
+    def unit(self, name, depth=0):
+        if name in self._units:
+            return self._units[name]
+        if name in self._busy or depth > 14:  # reference cycle / runaway nesting
+            return {}
+        self._busy.add(name)
+        acc = defaultdict(float)
+        sub = self.raw(name)
+        if sub:
+            self.all_of(sub, 1.0, acc, depth)
+        self._busy.discard(name)
+        self._units[name] = dict(acc)
+        return self._units[name]
 
     def all_of(self, node, mult, acc, depth=0):
         for key, val in node.items():
@@ -485,14 +500,23 @@ def notes(query=None, limit=5):
         return "No notes yet. Add verified findings with save_note."
     if not query:
         return "\n".join(f"- `{n}` — {t.splitlines()[0].lstrip('# ')}" for n, t in docs)
-    db = sqlite3.connect(":memory:")
-    db.execute("CREATE VIRTUAL TABLE n USING fts5(name, body, tokenize='unicode61 remove_diacritics 2')")
-    db.executemany("INSERT INTO n VALUES(?,?)", docs)
-    hits = db.execute("SELECT name, body FROM n WHERE n MATCH ? ORDER BY bm25(n) LIMIT ?", (core.fts_query(query), limit)).fetchall()
+    from . import patchnotes
+    try:  # persistent index in knowledge.db (rebuilt automatically when a note changes)
+        if os.path.abspath(KNOWLEDGE) != os.path.abspath(patchnotes.KNOWLEDGE_DIR):
+            raise AOError("notes directory is not the indexed one")
+        db, sql = patchnotes.kdb(), ("SELECT d.ref, d.text FROM kdocs_fts f JOIN kdocs d ON d.id=f.rowid "
+                                     "WHERE kdocs_fts MATCH ? AND d.kind='note' ORDER BY bm25(kdocs_fts, 5, 2, 1) LIMIT ?")
+    except AOError:  # no patch notes yet -> no knowledge.db: index the notes in memory
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE VIRTUAL TABLE n USING fts5(name, body, tokenize='unicode61 remove_diacritics 2')")
+        db.executemany("INSERT INTO n VALUES(?,?)", docs)
+        sql = "SELECT name, body FROM n WHERE n MATCH ? ORDER BY bm25(n) LIMIT ?"
+    hits = db.execute(sql, (core.fts_query(query), limit)).fetchall()
     if not hits:
-        hits = db.execute("SELECT name, body FROM n WHERE n MATCH ? ORDER BY bm25(n) LIMIT ?",
-                          (" OR ".join(core.fts_query(query).split()), limit)).fetchall()
-    db.close()
+        hits = db.execute(sql, (" OR ".join(core.fts_query(query).split()), limit)).fetchall()
+    hits = [tuple(h) for h in hits]
+    if sql.startswith("SELECT name"):  # the temporary in-memory index
+        db.close()
     return "\n\n---\n\n".join(f"<!-- {n} -->\n{_staleness(b)}{b}" for n, b in hits) or f"No notes match {query!r}"
 
 

@@ -17,7 +17,7 @@ Content (every template variant of the camp)
 - Anchor: the median base-stage solo (green) camp of the tier is tuned for tier-T .0 gear (IP 700 + 100·(T−4)), neutral damage mix.
   Needed IP = par + 100·ln(F / F_anchor)/ln(1.192). The verdict uses the median template; best/worst variants are shown.
 """
-import json, math, re, statistics
+import functools, json, math, re, statistics
 from collections import Counter
 from . import core, advisor, market, combat
 from .core import AOError, q, q1, label, money, fmt, table, resolve_item
@@ -220,10 +220,11 @@ def _raw_loadout(lo):
     return json.loads(s)
 
 
+@functools.lru_cache(maxsize=None)
 def chest_offline_values(behaviour, tier):
     """{chest name: expected value (game item value units)} for the stages of a chest behaviour."""
     ev, out = advisor.LootEV(), {}
-    for r in q("SELECT name, json FROM chests WHERE name LIKE ?", behaviour + "%"):
+    for r in q("SELECT name, json FROM chests WHERE name >= ? AND name < ?", behaviour, behaviour + "\uffff"):  # prefix range on the PK
         lists = advisor._chest_lists(json.loads(r["json"]), tier)
         if not lists:
             continue
@@ -325,6 +326,7 @@ def _cluster(points, radius=PULL_RADIUS):
     return list(groups.values())
 
 
+@functools.lru_cache(maxsize=None)
 def _variant(beh, level, solo):
     r = q1("SELECT mobs FROM spawnbehaviors WHERE name=?", beh)
     if not r:
@@ -404,6 +406,7 @@ def anchor_F(tier):
     return _anchor[tier]
 
 
+@functools.lru_cache(maxsize=None)
 def par_ip(tier):
     """Model IP of a tier-T .0 character (median weapon, reference leather set at the tier's IP)."""
     ip = 700 + 100 * (tier - 4)
@@ -492,6 +495,7 @@ def ehp(st):
 _ref_ehp = None
 
 
+@functools.lru_cache(maxsize=None)
 def reference_ehp(ip=1000):
     """EHP of a reference character: T4 mercenary leather set (hood/jacket/shoes) + broadsword, every slot at `ip`."""
     ids = ["T4_MAIN_SWORD", "T4_HEAD_LEATHER_SET1", "T4_ARMOR_LEATHER_SET1", "T4_SHOES_LEATHER_SET1"]
@@ -863,6 +867,13 @@ _cal_cache = {}
 
 def calibration_offset():
     """Mean (target − model) margin over the journal, capped at ±400 IP; None when the journal is empty."""
+    try:
+        stamp = CALIBRATION_FILE.stat().st_mtime_ns
+    except FileNotFoundError:
+        stamp = None
+    if _cal_cache.get("stamp") != stamp:  # journal edited outside this process (git pull, manual edit)
+        _cal_cache.clear()
+        _cal_cache["stamp"] = stamp
     if "v" not in _cal_cache:
         res = []  # (error, runs) — an entry with runs=N is the same setup/content cleared N times
         for obs in _cal_load():

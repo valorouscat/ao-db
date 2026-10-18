@@ -252,8 +252,9 @@ def mob_abilities(mob_id):
     if not stem or len(stem) < 8:
         return []
     out = []
-    for s in q("SELECT id, cooldown FROM spells WHERE id LIKE ? ESCAPE '\\' AND category IN ('damage','debuff','crowdcontrol','instant') "
-               "AND cooldown > 2", stem + "\\_%"):
+    lo = stem.upper() + "_"  # prefix range on the PK (ids are upper-case) instead of a full-scan LIKE
+    for s in q("SELECT id, cooldown FROM spells WHERE id >= ? AND id < ? AND category IN ('damage','debuff','crowdcontrol','instant') "
+               "AND cooldown > 2 ORDER BY rowid", lo, lo + "\uffff"):
         if re.search(r"_(EFFECT|APPLY|SOUND|DAMAGE|KNOCKBACK|IMMUNITY|AURA|COUNTER|START|ONDEATH|VOICE\w*)$", s["id"]):
             continue
         p = spell_profile(s["id"], "players")

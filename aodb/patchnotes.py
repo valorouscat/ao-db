@@ -14,6 +14,8 @@ KDB = os.environ.get("AO_KDB", os.path.join(ROOT, "knowledge.db"))
 KEEP = re.compile(r"changelog|patch|hotfix|update|dev ?talk|balance|release notes|known issues|roadmap|season \d+ (?:is|begins|starts)|is live|launch", re.I)
 DROP = re.compile(r"% off|vanity|ambassador|spotlight|twitch|bundle|account security|sale\b|giveaway|livestream|stream|q&a|contest|survey|reminder", re.I)
 _kcon = None
+_kcon_sig = None
+_kcon_checked = [0.0]
 
 
 # ------------------------------------------------------------------ fetching
@@ -110,6 +112,43 @@ def _read_meta(path):
 
 
 # ------------------------------------------------------------------ index
+KNOWLEDGE_DIR = os.path.join(ROOT, "knowledge")
+CALIBRATION = os.path.join(KNOWLEDGE_DIR, "calibration.json")
+KDB_SCHEMA = "2"  # bump when the knowledge.db layout changes -> automatic reindex
+
+
+def _sources():
+    """Every file knowledge.db is built from: patch notes, curated notes, the calibration journal."""
+    return sorted(glob.glob(os.path.join(PN_DIR, "*.md")) + glob.glob(os.path.join(KNOWLEDGE_DIR, "*.md")) +
+                  ([CALIBRATION] if os.path.exists(CALIBRATION) else []))
+
+
+def _signature():
+    """Schema + (name, size, mtime) of every source: catches added, edited and deleted files."""
+    import hashlib
+    h = hashlib.sha1(KDB_SCHEMA.encode())
+    for p in _sources():
+        st = os.stat(p)
+        h.update(f"{os.path.relpath(p, ROOT)}|{st.st_size}|{int(st.st_mtime)}\n".encode())
+    return h.hexdigest()
+
+
+def _calibration_docs():
+    try:
+        obs = json.load(open(CALIBRATION, encoding="utf-8")).get("observations", [])
+    except (FileNotFoundError, ValueError):
+        return []
+    out = []
+    for i, o in enumerate(obs, 1):
+        items = " ".join(e.get("item", "") for lo in o.get("loadouts", []) for e in (lo.get("equipment") or []) + (lo.get("inventory") or []))
+        names = ", ".join(lo.get("name", "?") for lo in o.get("loadouts", []))
+        title = f"Real outcome #{i}: {names} → {o.get('content')} T{o.get('tier')} {o.get('stage')} = {o.get('outcome')}"
+        text = (f"{title}. runs {o.get('runs', 1)}; IP {o.get('ips') or '?'}; mastery {o.get('mastery') or '?'}; min HP {o.get('min_hp')}; "
+                f"consumables {o.get('consumables_used') or '-'}; patch {o.get('patch') or '?'}. {o.get('notes') or ''} Items: {items}")
+        out.append(("calibration", f"calibration.json#{i}", o.get("date") or "", title, "", text))
+    return out
+
+
 def reindex():
     global _kcon
     _kcon = None
@@ -117,10 +156,22 @@ def reindex():
     if os.path.exists(tmp):
         os.remove(tmp)
     db = sqlite3.connect(tmp)
-    db.executescript("CREATE TABLE patches(file TEXT PRIMARY KEY, date TEXT, title TEXT, url TEXT, major INT);"
+    db.executescript("CREATE TABLE meta(k TEXT PRIMARY KEY, v TEXT);"
+                     "CREATE TABLE patches(file TEXT PRIMARY KEY, date TEXT, title TEXT, url TEXT, major INT);"
                      "CREATE TABLE sections(id INTEGER PRIMARY KEY, file TEXT, date TEXT, title TEXT, heading TEXT, text TEXT);"
+                     "CREATE INDEX sections_date ON sections(date);"
                      "CREATE VIRTUAL TABLE sections_fts USING fts5(title, heading, text, content='sections', content_rowid='id', "
+                     "tokenize='unicode61 remove_diacritics 2');"
+                     # curated notes (one row per note, full body) and calibration journal entries
+                     "CREATE TABLE kdocs(id INTEGER PRIMARY KEY, kind TEXT, ref TEXT, date TEXT, title TEXT, heading TEXT, text TEXT);"
+                     "CREATE VIRTUAL TABLE kdocs_fts USING fts5(title, heading, text, content='kdocs', content_rowid='id', "
                      "tokenize='unicode61 remove_diacritics 2');")
+    for p in sorted(glob.glob(os.path.join(KNOWLEDGE_DIR, "*.md"))):
+        body = open(p, encoding="utf-8").read()
+        m = re.search(r"_updated: (\d{4}-\d{2}-\d{2})", body)
+        db.execute("INSERT INTO kdocs(kind,ref,date,title,heading,text) VALUES(?,?,?,?,?,?)",
+                   ("note", os.path.basename(p), m.group(1) if m else "", body.splitlines()[0].lstrip("# ") if body else "", "", body))
+    db.executemany("INSERT INTO kdocs(kind,ref,date,title,heading,text) VALUES(?,?,?,?,?,?)", _calibration_docs())
     for p in sorted(glob.glob(os.path.join(PN_DIR, "*.md"))):
         f = os.path.basename(p)
         meta = _read_meta(p)
@@ -145,21 +196,42 @@ def reindex():
                 buf.append(line)
         flush()
     db.execute("INSERT INTO sections_fts(sections_fts) VALUES('rebuild')")
+    db.execute("INSERT INTO kdocs_fts(kdocs_fts) VALUES('rebuild')")
+    for ft in ("sections_fts", "kdocs_fts"):
+        db.execute(f"INSERT INTO {ft}({ft}) VALUES('optimize')")
+    db.execute("INSERT INTO meta VALUES('signature', ?)", (_signature(),))
     db.commit()
+    db.execute("ANALYZE")
     db.close()
     os.replace(tmp, KDB)
 
 
 def kdb():
     global _kcon
+    # a note / journal entry / patch note may change while a long-lived process (MCP server) runs: re-check every 2 s
+    if _kcon is not None and time.time() - _kcon_checked[0] > 2:
+        _kcon_checked[0] = time.time()
+        if _kcon_sig != _signature():
+            _kcon.close()
+            _kcon = None
     if _kcon is None:
-        newest = max((os.path.getmtime(p) for p in glob.glob(os.path.join(PN_DIR, "*.md"))), default=0)
-        if not os.path.exists(KDB) or os.path.getmtime(KDB) < newest:
-            if not newest:
-                raise AOError("No patch notes stored yet. Run update_patchnotes (python3 -m aodb.patchnotes --update --full).")
+        if not glob.glob(os.path.join(PN_DIR, "*.md")):
+            raise AOError("No patch notes stored yet. Run update_patchnotes (python3 -m aodb.patchnotes --update --full).")
+        sig = _signature()
+        stored = None
+        if os.path.exists(KDB):
+            try:
+                c = sqlite3.connect(KDB)
+                stored = (c.execute("SELECT v FROM meta WHERE k='signature'").fetchone() or [None])[0]
+                c.close()
+            except sqlite3.Error:
+                stored = None
+        if stored != sig:
             reindex()
         _kcon = sqlite3.connect(KDB, check_same_thread=False)
         _kcon.row_factory = sqlite3.Row
+        globals()["_kcon_sig"] = sig
+        _kcon_checked[0] = time.time()
     return _kcon
 
 

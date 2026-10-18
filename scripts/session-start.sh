@@ -9,6 +9,11 @@ if [ ! -f ao.db ]; then
   ./setup.sh >&2 || echo "ao-db: setup failed; run ./setup.sh manually" >&2
   exit 0
 fi
+# code expects a newer ao.db layout (new tables / indexes) -> rebuild from the local dumps
+if [ -d ao-bin-dumps ] && ! python3 -c "import sqlite3,sys; from aodb.build import SCHEMA_VERSION as v; r=sqlite3.connect('ao.db').execute(\"SELECT v FROM meta WHERE k='schema'\").fetchone(); sys.exit(0 if r and r[0]==v else 1)" 2>/dev/null; then
+  echo "ao-db: index layout changed, rebuilding ao.db (~20 s)..." >&2
+  python3 -m aodb.build >&2 || echo "ao-db: rebuild failed; run python3 -m aodb.build" >&2
+fi
 if [ -d ao-bin-dumps/.git ]; then
   local_rev=$(git -C ao-bin-dumps rev-parse HEAD 2>/dev/null)
   remote_rev=$(timeout 20 git -C ao-bin-dumps ls-remote origin HEAD 2>/dev/null | cut -f1)

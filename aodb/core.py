@@ -14,7 +14,7 @@ SPELL_ICON = "https://render.albiononline.com/v1/spell/{}.png"
 TIER_NAMES = {1: "Beginner", 2: "Novice", 3: "Journeyman", 4: "Adept", 5: "Expert", 6: "Master", 7: "Grandmaster", 8: "Elder"}
 ENCHANT_NAMES = {0: "", 1: "Uncommon", 2: "Rare", 3: "Exceptional", 4: "Pristine"}
 QUALITY_NAMES = {1: "Normal", 2: "Good", 3: "Outstanding", 4: "Excellent", 5: "Masterpiece"}
-TYPES = ("items", "spells", "mobs", "zones", "loc", "docs")
+TYPES = ("items", "spells", "mobs", "zones", "structs", "knowledge", "loc", "docs")
 
 STAT_KEYS = ["itempower", "abilitypower", "attackdamage", "attackspeed", "attackrange", "hitpointsmax", "hitpointsregenerationbonus",
              "energymax", "energyregenerationbonus", "physicalarmor", "magicresistance", "crowdcontrolresistance", "healmodifier",
@@ -91,7 +91,9 @@ def label(iid):
     return f"{pick(r) or '?'}{t} (`{iid}`)"
 
 
+@functools.lru_cache(maxsize=8192)
 def item_json(iid):
+    """Parsed items.json record (cached — treat as read-only)."""
     r = q1("SELECT json FROM items WHERE id=?", iid)
     return json.loads(r["json"]) if r else {}
 
@@ -179,6 +181,23 @@ def search(query, types=None, limit=10):
     if "zones" in want:
         sec("Zones", q("SELECT c.idx, c.name, c.type, c.biome, c.tier, c.zone FROM clusters_fts f JOIN clusters c ON c.idx=f.idx "
                        "WHERE clusters_fts MATCH ? ORDER BY bm25(clusters_fts) LIMIT ?", fq, limit), ["index", "name", "type", "biome", "T", "flags"])
+    if "structs" in want and q1("SELECT 1 FROM sqlite_master WHERE name='structs_fts'"):  # absent in pre-v3 ao.db
+        sec("Game structures (camps, spawn behaviours, chest stages, chests, modifiers)",
+            q("SELECT kind, key, title, snippet(structs_fts, 3, '**', '**', '…', 10) FROM structs_fts WHERE structs_fts MATCH ? "
+              "ORDER BY (key LIKE 'TEST%' OR key LIKE '%TEST\\_%' ESCAPE '\\'), bm25(structs_fts, 1, 10, 5, 1) LIMIT ?", fq, limit), ["kind", "key", "chest / faction / source", "contains"])
+    if "knowledge" in want:
+        from . import patchnotes  # lazy: patchnotes imports core
+        try:
+            k = patchnotes.kdb()
+            rows = [(r["kind"], r["ref"], r["date"], r["title"][:90], r["snip"]) for r in k.execute(
+                "SELECT d.kind, d.ref, d.date, d.title, snippet(kdocs_fts, 2, '**', '**', '…', 12) snip FROM kdocs_fts f "
+                "JOIN kdocs d ON d.id=f.rowid WHERE kdocs_fts MATCH ? ORDER BY bm25(kdocs_fts, 5, 2, 1) LIMIT ?", (fq, limit))]
+            rows += [("patch note", f"[src]({r['url']})", r["date"], f"{r['title']} › {r['heading'] or 'intro'}"[:90],
+                      patchnotes._snippet(r["text"], query.split()[0], 120)) for r in patchnotes._select(query, None, min(limit, 5))]
+            sec("Knowledge (curated notes, real-outcome journal, patch notes — newest first)", rows,
+                ["kind", "source", "date", "title", "snippet"])
+        except (AOError, sqlite3.OperationalError):
+            pass
     if "loc" in want:
         sec("Game text (localization)", q("SELECT l.key, substr(replace(l.en,char(10),' '),1,100), substr(replace(l.ru,char(10),' '),1,100) "
                                           "FROM loc_fts f JOIN loc l ON l.rowid=f.rowid WHERE loc_fts MATCH ? ORDER BY bm25(loc_fts, 2, 5, 5) LIMIT ?",
@@ -208,7 +227,8 @@ def returnable(maxreturn):
 @functools.lru_cache(maxsize=None)
 def item_value(iid, _depth=0):
     """Game 'item value' (basis of station fees): own @itemvalue or sum over recipe resources."""
-    v = num(item_json(iid).get("@itemvalue"))
+    r = q1("SELECT itemvalue FROM items WHERE id=?", iid)  # indexed column, no JSON parse
+    v = r["itemvalue"] if r else None
     if v is not None or _depth > 3:
         return v
     recs = recipes_of(iid)
@@ -567,10 +587,15 @@ def files():
 
 
 def doc(file, key=None, limit=5, keys_only=False, max_chars=8000):
-    if key:
-        rows = q("SELECT * FROM docs WHERE file LIKE ? AND (key=? OR key LIKE ?) LIMIT ?", f"%{file}%", key, key, limit)
+    # resolve file names on the covering (file, key) index first, then fetch only the matching records
+    fs = [r[0] for r in q("SELECT DISTINCT file FROM docs WHERE file LIKE ?", f"%{file}%")]
+    ph = ",".join("?" * len(fs))
+    if not fs:
+        rows = []
+    elif key:
+        rows = q(f"SELECT * FROM docs WHERE file IN ({ph}) AND (key=? OR key LIKE ?) ORDER BY id LIMIT ?", *fs, key, key, limit)
     else:
-        rows = q("SELECT * FROM docs WHERE file LIKE ? LIMIT ?", f"%{file}%", limit)
+        rows = q(f"SELECT * FROM docs WHERE file IN ({ph}) ORDER BY id LIMIT ?", *fs, limit)
     if not rows:
         raise AOError("No records. Use files() for file names; key accepts SQL LIKE patterns (%).")
     if keys_only:
@@ -596,7 +621,11 @@ def schema():
 def info():
     """Data versions and freshness: game data dump vs latest official patch notes."""
     from . import patchnotes
-    o = [f"- {r['k']}: {r['v']}" for r in q("SELECT * FROM meta")]
+    from .build import SCHEMA_VERSION
+    meta = {r["k"]: r["v"] for r in q("SELECT k, v FROM meta WHERE k != 'itempowerprogression'")}
+    o = [f"- {k}: {v}" for k, v in meta.items()]
+    if meta.get("schema") != SCHEMA_VERSION:
+        o.append(f"- ⚠ ao.db schema {meta.get('schema') or 'v1-2'} ≠ code {SCHEMA_VERSION}: run `python3 -m aodb.build` (new indexes / search sections)")
     try:
         pdate, ptitle = patchnotes.current_patch()
         mdate, mtitle = patchnotes.last_major()
@@ -608,7 +637,14 @@ def info():
                      "run ./setup.sh to pull newer dumps")
     except AOError as e:
         o.append(f"- patch notes: {e}")
-    o += [f"- {t}: {q1(f'SELECT COUNT(*) FROM {t}')[0]}" for t in ["items", "recipes", "spells", "mobs", "loot", "clusters", "loc", "docs"]]
+    o += [f"- {t}: {q1(f'SELECT COUNT(*) FROM {t}')[0]}" for t in ["items", "recipes", "spells", "mobs", "loot", "clusters", "loc", "docs", "camps"]
+          if q1("SELECT 1 FROM sqlite_master WHERE name=?", t)]
+    try:
+        k = patchnotes.kdb()
+        o.append("- knowledge.db: " + ", ".join(f"{n} {kind}" for kind, n in k.execute(
+            "SELECT kind, COUNT(*) FROM kdocs GROUP BY kind UNION ALL SELECT 'patch-note sections', COUNT(*) FROM sections")))
+    except (AOError, sqlite3.OperationalError):
+        pass
     return "\n".join(o)
 
 
