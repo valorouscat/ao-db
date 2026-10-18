@@ -189,6 +189,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     # killboard field at the content's fight size (opponents at their own IP, after the zone cap)
     rows, fips, nev = pvp.field(rules["scale"], server, pages)
     field = [(pvp.build_pvp_player(r["loadout"], {"avg_ip": r["ip"] or pvp._pct(fips, 0.5) or 1100}, rules), r["n"]) for r in rows[:8]]
+    opp_labels = [pvp.opponent_label(r) for r in rows[:8]]
     if not field:
         raise AOError("Empty killboard field; raise pages")
 
@@ -206,7 +207,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         estimated = sum(1 for pr, flag, _ in est if pr is not None and flag)
         cost = sum((pr or 0) * n for pr, _, n in est)
         return {"wfam": wfam, "kit": kit[0], "level": level, "loadout": lo, "pve": pve, "win": win, "live": live, "cost": cost,
-                "missing": missing, "estimated": estimated, "win_ci": win_ci, "spells": [s for sl, s in me["spells"] if sl == "mainhand"]}
+                "missing": missing, "estimated": estimated, "win_ci": win_ci, "duels": [d for d, _ in duels], "spells": [s for sl, s in me["spells"] if sl == "mainhand"]}
 
     # stage 1: every weapon × kit at the middle level; stage 2: the shortlist at every level
     mid = levels[len(levels) // 2]
@@ -289,6 +290,11 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     if eff:
         o.append(f"\n### Best value (score per 100k silver, {'within the budget' if budget else 'any budget'})\n"
                  + table([row(r) for r in eff], hdr))
+    seen_w = set()  # the five best weapons, each in its best build
+    lead = [r for r in sorted(priced, key=lambda r: -r["score"]) if not (r["wfam"] in seen_w or seen_w.add(r["wfam"]))][:5]
+    if lead:
+        o.append("\n### Matchups of the leaders (model win / die % vs each killboard build at its own IP; ✅ win ≥ 60, ⚠ die ≥ 40)\n"
+                 + pvp.matchup_matrix([(f"{r['loadout']['name'].split(' · ')[0]} {r['level']}", r["duels"]) for r in lead], opp_labels))
     top = max(priced, key=lambda r: r["score"]) if priced else None
     if top:
         o.append("\n**Strongest overall:** " + ", ".join(label(e["item"]) for e in top["loadout"]["equipment"][:6]))

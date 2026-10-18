@@ -388,6 +388,30 @@ def weighted_ci(xs, ws):
     return m, 1.645 * math.sqrt(var)
 
 
+def opponent_label(row):
+    """Short name of a killboard field build: weapon (armor), with its kill count."""
+    sig = row["sig"]
+    return f"{advisor._fam_name(sig[0])} ({advisor._fam_name(sig[3]) if sig[3] else '—'}) ×{row['n']}"
+
+
+def matchup_matrix(builds, opponents):
+    """Markdown: one row per build, one column per opponent with 'win / die' % (✅ win ≥ 60, ⚠ die ≥ 40 — in full-loot
+    content the death chance is what costs the bag; the rest of 100 is fights someone escapes), and a verdict per build: who
+    it beats and who is most dangerous to it. builds: [(label, [duel dict per opponent])], opponents: [label]."""
+    cell = lambda d: f"{d['win'] * 100:.0f} / {d['lose'] * 100:.0f}" + (" ✅" if d["win"] >= 0.6 else "") + (" ⚠" if d["lose"] >= 0.4 else "")
+    rows = [(lbl, *[cell(d) for d in ds]) for lbl, ds in builds]
+    short = lambda o: o.rsplit(" ×", 1)[0]
+    lines = []
+    for lbl, ds in builds:
+        beats = [f"{short(o)} {d['win']:.0%}" for o, d in sorted(zip(opponents, ds), key=lambda x: -x[1]["win"]) if d["win"] >= 0.6][:3]
+        danger = sorted(zip(opponents, ds), key=lambda x: -x[1]["lose"])
+        bad = [f"{short(o)} (dies {d['lose']:.0%}, wins {d['win']:.0%})" for o, d in danger if d["lose"] >= 0.4][:2]
+        lines.append(f"- **{lbl}**: " + (f"beats {', '.join(beats)}" if beats else "no clear wins") + "; " + (
+            "dies to " + ", ".join(bad) if bad else
+            f"most dangerous: {short(danger[0][0])} (dies {danger[0][1]['lose']:.0%})"))
+    return table(rows, ["build (win / die %)", *opponents]) + "\n" + "\n".join(lines)
+
+
 def pct_ci(m, half):
     return f"{m:.0%} ±{half * 100:.0f}"
 
@@ -586,6 +610,11 @@ def pvp_builds(content="mists_black", server="europe", pages=10, budget=None, we
         o.append(f"_Prices incomplete: {'; '.join(warn)}_")
     if budget:
         o.append(f"_Budget filter: ≤ {money(budget)} (re-gear at quality 1, {city})._")
+    if ranked:
+        opp_rows = rows[:8]
+        o.append("\n### Matchups of the top builds (model win / die % vs each killboard build; ✅ win ≥ 60, ⚠ die ≥ 40)\n" + matchup_matrix(
+            [(f"{i + 1}. {advisor._fam_name(r['sig'][0])}", [duel(p, players[rows.index(o_)]) for o_ in opp_rows])
+             for i, (_, r, p, _, _) in enumerate(ranked[:min(top, 5)])], [opponent_label(o_) for o_ in opp_rows]))
     o.append(advisor.kb_line())
     o.append("\n_Score = 0.6 × model win rate vs the field + 0.4 × killboard K/D share. Killboard = open-world deaths only "
              "(instanced corrupted dungeons / hellgates are not in the public feed): use it as the meta proxy for the fight size._\n"

@@ -514,6 +514,15 @@ class KillboardStore(unittest.TestCase):
             self.assertNotIn("Participants", evs[0])                          # slim events only
             self.assertEqual(pvp._fight_scale(evs[0]), "solo")
 
+    def test_matchup_matrix(self):
+        d = lambda w, lose: {"win": w, "lose": lose}
+        t = pvp.matchup_matrix([("A", [d(0.9, 0.1), d(0.3, 0.6), d(0.48, 0.02)]), ("B", [d(0.55, 0.3), d(0.45, 0.35), d(0.5, 0.2)])],
+                               ["X (r) ×3", "Y (r) ×2", "Z (r) ×1"])
+        self.assertIn("90 / 10 ✅", t)
+        self.assertIn("30 / 60 ⚠", t)
+        self.assertIn("**A**: beats X (r) 90%; dies to Y (r) (dies 60%, wins 30%)", t)
+        self.assertIn("**B**: no clear wins; most dangerous: Y (r) (dies 35%)", t)   # ranked by death, not by win
+
     def test_weighted_ci(self):
         m, half = pvp.weighted_ci([1.0, 0.0], [10, 10])
         self.assertAlmostEqual(m, 0.5)
