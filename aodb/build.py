@@ -47,6 +47,10 @@ CREATE INDEX loot_target ON loot(target);
 CREATE TABLE loot_raw(name TEXT PRIMARY KEY, json TEXT);
 CREATE TABLE chests(name TEXT PRIMARY KEY, chesttype TEXT, faction TEXT, json TEXT);
 CREATE TABLE modifiers(source TEXT, grp TEXT, level TEXT, mobbuff TEXT, loot REAL, silver REAL, fame REAL, extra TEXT);
+CREATE TABLE spawnbehaviors(name TEXT PRIMARY KEY, faction TEXT, mobs TEXT);
+CREATE TABLE chest_upgrades(name TEXT PRIMARY KEY, marker TEXT, stages TEXT, json TEXT);
+CREATE TABLE camps(template TEXT, layer TEXT, chest_tile TEXT, chest_behaviour TEXT, spawns TEXT);
+CREATE INDEX camps_beh ON camps(chest_behaviour);
 CREATE TABLE clusters(idx TEXT PRIMARY KEY, name TEXT, file TEXT, type TEXT, biome TEXT, tier INT, zone TEXT);
 CREATE VIRTUAL TABLE clusters_fts USING fts5(idx, name, file, tokenize='unicode61');
 
@@ -326,6 +330,48 @@ class Builder:
         self.db.executemany("INSERT INTO modifiers VALUES(?,?,?,?,?,?,?,?)", rows)
         self.log("modifiers", len(rows))
 
+    # ---------------------------------------------------------------- open-world camps (templates → guards, chest upgrades)
+    def build_camps(self):
+        rsb = load(self.repo, "randomspawnbehaviors.json")["randomspawnbehaviors"]
+        rows = []
+        for b in aslist(rsb.get("spawnbehavior")):
+            d = b.get("default") or {}
+            mobs = [{"mob": m.get("@name"), "weight": num(m.get("@weight")) or 1, "level": int(num(m.get("@mobUpgradeLevelIndex")) or 0)}
+                    for m in aslist(d.get("mob")) if isinstance(m, dict)]
+            rows.append((b["@name"], d.get("@faction"), json.dumps(mobs)))
+        self.db.executemany("INSERT OR REPLACE INTO spawnbehaviors VALUES(?,?,?)", rows)
+        lc = load(self.repo, "lootchests.json")["LootChests"]
+        up = []
+        for c in aslist(lc.get("LootChestSpawnpointChestUpgrade")):
+            stages = [{"chest": x.get("@name"), "level": int(num(x.get("@lootchestupgradelevelindex")) or 0), "weight": num(x.get("@weight")) or 1}
+                      for x in aslist(c.get("LootChest"))]
+            up.append((c["@name"], (c.get("MinimapDisplay") or {}).get("@minimapmarker"), json.dumps(stages), json.dumps(c, ensure_ascii=False)))
+        self.db.executemany("INSERT OR REPLACE INTO chest_upgrades VALUES(?,?,?,?)", up)
+        tiles = {}
+        tpath = os.path.join(self.repo, "cluster", "tiles.xml")
+        if os.path.exists(tpath):
+            with open(tpath, encoding="utf-8", errors="replace") as fh:
+                for m in re.finditer(r'<tile name="([^"]+)"[^>]*>\s*<lootchestspawnpoint spawnbehaviour="([^"]+)"', fh.read()):
+                    tiles[m.group(1)] = m.group(2)
+        camps = []
+        for path in glob.glob(os.path.join(self.repo, "templates", "*", "*.template.xml")):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                txt = fh.read()
+            if "SpawnPoint_LOOTCHEST" not in txt:
+                continue
+            for lm in re.finditer(r'<layer id="[^"]*" name="([^"]*)">(.*?)</layer>', txt, re.S):
+                body = lm.group(2)
+                chests = re.findall(r'tile name="(SpawnPoint_LOOTCHEST[^"]*)"', body)
+                if not chests:
+                    continue
+                spawns = {}
+                for sbn in re.findall(r'spawnbehavior="([^"]+)"', body):
+                    spawns[sbn] = spawns.get(sbn, 0) + 1
+                for ct in sorted(set(chests)):
+                    camps.append((os.path.basename(path).replace(".template.xml", ""), lm.group(1), ct, tiles.get(ct), json.dumps(spawns)))
+        self.db.executemany("INSERT INTO camps VALUES(?,?,?,?,?)", camps)
+        self.log("spawnbehaviors", len(rows), "chest upgrades", len(up), "camps", len(camps))
+
     # ---------------------------------------------------------------- clusters
     def build_clusters(self):
         world = load(self.repo, "formatted/world.json")
@@ -434,6 +480,7 @@ class Builder:
         self.build_mobs()
         self.build_loot()
         self.build_modifiers()
+        self.build_camps()
         self.build_clusters()
         self.build_docs()
         rev = os.popen(f"git -C '{self.repo}' log -1 --format='%h %cs %s' 2>/dev/null").read().strip()

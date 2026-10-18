@@ -1,5 +1,5 @@
 """Single registry of operations. The CLI and the MCP server are both generated from it."""
-from . import advisor, core, market, patchnotes
+from . import advisor, core, gearcheck, market, patchnotes
 
 S, I, N, B, A = "string", "integer", "number", "boolean", "array"
 Q_ITEM = "Item ID (T4_MAIN_SWORD@2) or name in any language, optional tier prefix ('6.1 broadsword', 'T8 палаш')"
@@ -82,6 +82,15 @@ TOOLS = [
          params=dict(items=P(A, "Items of the build (IDs/names, optional 'Nx' quantity)", required=True),
                      server=P(S, "Game server", "europe", enum=list(market.SERVERS)), city=P(S, "Market city", "Caerleon"),
                      quality=P(I, "1 normal … 5 masterpiece", 1), compare_enchants=P(B, "Add .0-.3 comparison", True))),
+    dict(name="gear_check", fn=gearcheck.gear_check,
+         desc="Can a player's loadout farm given PvE content? Parses an in-game loadout export (JSON), computes item power, checks the "
+              "spell kit (AoE, sustain, defensive, mobility, CC) and consumables, models the camp's guards at every chest stage and tier "
+              "from the game files, gives an IP margin + verdict per tier/stage, and the re-gear cost.",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export format with equipment/inventory) or @path/to/file.json", required=True),
+                     content=P(S, "avalon_solo (green), avalon_veteran (blue), avalon_elite (gold)", "avalon_solo"),
+                     tiers=P(A, "Content tiers to check, e.g. ['4','6','8']"), stages=P(A, "Chest stages: small, medium, large"),
+                     spec_ip=P(I, "Extra IP from mastery/specialization", 0), server=P(S, "Market server", "europe", enum=list(market.SERVERS)),
+                     city=P(S, "Price city for re-gear cost", "Caerleon"), price=P(B, "Look up re-gear cost", True))),
     dict(name="chest_value", fn=advisor.chest_value,
          desc="Expected loot value of chests (Avalon roads, corrupted dungeons, hellgates, mists, static dungeons, treasure...) computed "
               "through the loot tables; ranks chests so you can tell which are worth opening.",

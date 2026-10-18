@@ -2,7 +2,7 @@
 import json, os, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, market, mcp_server, patchnotes
+from aodb import advisor, core, gearcheck, market, mcp_server, patchnotes
 from aodb.tools import TOOLS, call
 
 
@@ -82,6 +82,31 @@ class Advisor(unittest.TestCase):
                 advisor.save_note("x", "y", [])
             advisor.save_note("Avalon chest test", "Green chests are cheap", ["test://source"], ["avalon"])
             self.assertIn("Green chests", advisor.notes("avalon chest"))
+
+
+LOADOUT = {"name": "bow", "equipment": [
+    {"item": "T6_2H_BOW_KEEPER@1", "quality": 3, "activeSpells": ["MULTISHOT2", "BURNINGARROWS", "LIGHTNING_ARROW"], "passiveSpells": ["PASSIVE_ENERGYCHANCE_BOW"]},
+    {"item": "T6_HEAD_LEATHER_SET2@1", "quality": 3, "activeSpells": ["ENERGY_BARRIER"]},
+    {"item": "T6_ARMOR_LEATHER_SET1@1", "quality": 3, "activeSpells": ["BLOODLUST"]},
+    {"item": "T6_SHOES_LEATHER_SET1@1", "quality": 3, "activeSpells": ["SPRINT_CD_REDUCTION"]},
+    {"item": "T4_CAPEITEM_FW_THETFORD@2", "quality": 3}, {"item": "T8_POTION_CLEANSE"}, {"item": "T7_MEAL_ROAST", "stack": 3}]}
+
+
+class GearCheck(unittest.TestCase):
+    def test_ip_and_kit(self):
+        _, entries = gearcheck.parse_loadout(json.dumps(LOADOUT))
+        ip, _ = gearcheck.loadout_ip(entries)
+        self.assertAlmostEqual(ip, (1115 * 2 + 1040 * 3 + 940) / 6, places=3)  # 2H counts twice, quality +40
+        flags, _ = gearcheck.kit(entries)
+        self.assertTrue(flags["AoE"] and flags["sustain"] and flags["defensive"])
+
+    def test_camp_model(self):
+        prof = gearcheck.content_profile("AVALON_SMALL_SOLO", [6])
+        self.assertEqual([p["stage"] for p in prof], [0, 1, 2])
+        self.assertLess(prof[0]["F"], prof[2]["F"])  # guards upgrade with the chest
+        t = gearcheck.gear_check(json.dumps(LOADOUT), "green", tiers=["6"], price=False)
+        self.assertIn("Invisibility Potion", t)
+        self.assertIn("verdict", t)
 
 
 class PatchNotes(unittest.TestCase):
