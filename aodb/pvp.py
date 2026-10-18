@@ -377,6 +377,21 @@ def _pct(ips, p):
     return s[min(int(p * len(s)), len(s) - 1)] if s else None
 
 
+def weighted_ci(xs, ws):
+    """(mean, ± 90% half-width) of xs weighted by kill counts ws: the field's build mix is a sample of sum(ws) fights, so
+    a smaller sample or opponents the build fares very differently against widen the range."""
+    tw = sum(ws)
+    if not tw:
+        return 0.0, 0.0
+    m = sum(x * w for x, w in zip(xs, ws)) / tw
+    var = sum(w / tw * (x - m) ** 2 for x, w in zip(xs, ws)) / tw
+    return m, 1.645 * math.sqrt(var)
+
+
+def pct_ci(m, half):
+    return f"{m:.0%} ±{half * 100:.0f}"
+
+
 # ------------------------------------------------------------------ tools
 def pvp_rules(content=None):
     """Rules of PvP / PvPvE content from the game data: lethality, soft cap, entry IP, team size, reward multipliers."""
@@ -531,7 +546,8 @@ def pvp_builds(content="mists_black", server="europe", pages=10, budget=None, we
         if weapon and advisor._family(core.resolve_item(weapon)) != r["sig"][0]:
             continue
         others = [(players[j], rows[j]["n"]) for j in range(len(rows)) if j != i]
-        wr = sum(w * duel(p, o)["win"] for o, w in others) / max(sum(w for _, w in others), 1)
+        wr, half = weighted_ci([duel(p, o)["win"] for o, _ in others], [w for _, w in others])
+        p["win_ci"] = half
         ids = [e["id"] for e in p["entries"]]
         out.append((r, p, wr, ids))
     if not out:
@@ -550,7 +566,7 @@ def pvp_builds(content="mists_black", server="europe", pages=10, budget=None, we
         score = 0.6 * wr + 0.4 * min(r["kd"] / (1 + r["kd"]), 1)  # model vs empirical
         ranked.append((score, r, p, wr, cost))
     ranked.sort(key=lambda x: -x[0])
-    trs = [(i + 1, _sig_text(r["sig"]), f"{r['kills']}/{r['deaths']}", f"{r['kd']:.2f}", f"{r['ip'] or 0:.0f}", f"{wr:.0%}",
+    trs = [(i + 1, _sig_text(r["sig"]), f"{r['kills']}/{r['deaths']}", f"{r['kd']:.2f}", f"{r['ip'] or 0:.0f}", pct_ci(wr, p["win_ci"]),
             (money(cost) + (f" (+{p['missing']} unpriced)" if p.get("missing") else "")) if cost else "n/a", f"{s:.2f}") for i, (s, r, p, wr, cost) in enumerate(ranked[:top])]
     o = [f"## PvP builds for {rules['title']}", "",
          f"Killboard {server}: {nev} recent open-world kills, fights of scale **{rules['scale']}**; builds simulated against each "
@@ -570,6 +586,7 @@ def pvp_builds(content="mists_black", server="europe", pages=10, budget=None, we
         o.append(f"_Prices incomplete: {'; '.join(warn)}_")
     if budget:
         o.append(f"_Budget filter: ≤ {money(budget)} (re-gear at quality 1, {city})._")
+    o.append(advisor.kb_line())
     o.append("\n_Score = 0.6 × model win rate vs the field + 0.4 × killboard K/D share. Killboard = open-world deaths only "
              "(instanced corrupted dungeons / hellgates are not in the public feed): use it as the meta proxy for the fight size._\n"
              + PVP_NOTE)
@@ -600,16 +617,10 @@ def farm_plan(loadout, contents=None, ips=None, silver_per_hour=None, encounters
             except AOError:
                 fields[r["scale"]] = ([], [])
         f, fips = fields[r["scale"]]
-        win = lose = None
+        win = lose = win_ci = None
         if f:
-            ws, ls, tw = 0.0, 0.0, 0.0
-            for b in f:
-                op = build_pvp_player(b["loadout"], {"avg_ip": b["ip"] or _pct(fips, 0.5) or 1100}, r)
-                d = duel(me, op)
-                ws += b["n"] * d["win"]
-                ls += b["n"] * d["lose"]
-                tw += b["n"]
-            win, lose = ws / tw, ls / tw
+            ds = [duel(me, build_pvp_player(b["loadout"], {"avg_ip": b["ip"] or _pct(fips, 0.5) or 1100}, r)) for b in f]
+            (win, win_ci), (lose, _) = (weighted_ci([d[k_] for d in ds], [b["n"] for b in f]) for k_ in ("win", "lose"))
         e_h = enc.get(k, ENCOUNTERS.get(k, 1.0))
         loss_h = e_h * (lose or 0.5) * regear if r["lethal"] else 0.0
         entry_ok = not r["entry_ip"] or me["avg"] >= r["entry_ip"]
@@ -619,7 +630,7 @@ def farm_plan(loadout, contents=None, ips=None, silver_per_hour=None, encounters
         pve_txt = (f"T{pve['tier']}: {pve['low']:.0%} / {pve['low_pess']:.0%} HP, {pve['fame_h']:,.0f} fame/h"
                    + (f", elite risk {pve['elite']:.0%} at {pve['worst_map']}" if pve["elite"] >= 0.05 else "")) if pve else "—"
         rows.append((k, r["title"], "✅" if entry_ok else f"⛔ <{r['entry_ip']:.0f}", f"{me['eff_avg']:.0f}",
-                     f"{win:.0%}" if win is not None else "n/a", f"{lose:.0%}" if lose is not None else "n/a", f"{e_h:g}",
+                     pct_ci(win, win_ci) if win is not None else "n/a", f"{lose:.0%}" if lose is not None else "n/a", f"{e_h:g}",
                      f"×{r['loot']:g} / ×{r['silver']:g} / ×{r['fame']:g}", money(loss_h) if r["lethal"] else "0 (no loss)",
                      money(loss_h) if r["lethal"] else "any", net, pve_txt))
     o = [f"## Farm plan for “{base_player['name']}”", "",
@@ -631,7 +642,7 @@ def farm_plan(loadout, contents=None, ips=None, silver_per_hour=None, encounters
          "silver/hour beats the break-even. Fights per hour are assumptions (override `encounters_per_hour`, e.g. "
          "'mists_black=2,corrupted_stalker=1'); give your measured `silver_per_hour` to get net profit. Reward multipliers come "
          "from ClusterDangerBonus and stack with tier and chest rarity. Monsters column: encounter_sim over the content's maps "
-         "(corrupted dungeons / Mists camps) — run it for details._\n" + PVP_NOTE]
+         "(corrupted dungeons / Mists camps) — run it for details._\n" + PVP_NOTE, advisor.kb_line()]
     return "\n".join(o)
 
 

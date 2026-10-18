@@ -1,6 +1,7 @@
 """Higher-level analysis for general questions: chest value, build cost, killboard meta, official mechanics texts, notes."""
 import datetime, functools, glob, json, os, re, sqlite3, time, urllib.request
 from collections import Counter, defaultdict
+from contextlib import closing
 from . import core
 from .core import AOError, q, q1, label, money, fmt, table, resolve_item, item_value, ROOT
 from . import market
@@ -266,31 +267,103 @@ def build_cost(items, server="europe", city="Caerleon", quality=1, compare_encha
 
 # ------------------------------------------------------------------ killboard meta
 GAMEINFO = {"europe": "gameinfo-ams", "west": "gameinfo", "east": "gameinfo-sgp"}
-_kb_cache = {}
+KB_DB = os.path.join(market.CACHE_DIR, "killboard.sqlite")  # slim kill events, accumulated across runs (API shows ~1000 newest)
+KB_FRESH = 300  # seconds before the newest pages are fetched again
+KB_MAX = 30000  # events read back per call
+KB_MIN_SINCE_PATCH = 500  # fewer events since the current patch → fall back to the last major update
+KB_INFO = {}  # what the last _events call used: since, events, new, stored, warning
+_SLOTS = ("MainHand", "OffHand", "Head", "Armor", "Shoes", "Cape", "Potion", "Food", "Mount", "Bag")
 
 
-def _events(server, pages):
+def _slim(e):
+    """The parts of a kill event the meta tools read (full events carry every participant's gear and inventory)."""
+    side = lambda p: {"AverageItemPower": (p or {}).get("AverageItemPower"),
+                      "Equipment": {k: {"Type": v.get("Type"), "Quality": v.get("Quality")}
+                                    for k, v in ((p or {}).get("Equipment") or {}).items() if k in _SLOTS and v}}
+    return {"EventId": e.get("EventId"), "TimeStamp": e.get("TimeStamp"),
+            "numberOfParticipants": e.get("numberOfParticipants") or len(e.get("Participants") or []) or 1,
+            "Killer": side(e.get("Killer")), "Victim": side(e.get("Victim"))}
+
+
+def _kb():
+    os.makedirs(market.CACHE_DIR, exist_ok=True)
+    con = sqlite3.connect(KB_DB, timeout=10)
+    con.executescript("CREATE TABLE IF NOT EXISTS events(server TEXT, id INTEGER, ts TEXT, data TEXT, PRIMARY KEY(server, id));"
+                      "CREATE INDEX IF NOT EXISTS events_ts ON events(server, ts);"
+                      "CREATE TABLE IF NOT EXISTS fetched(server TEXT PRIMARY KEY, at REAL);")
+    return con
+
+
+def _kb_page(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "ao-db (github.com/valorouscat/ao-db)"})
+    for attempt in range(3):  # the gameinfo API often answers 5xx / times out under load
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except Exception as e:
+            if attempt == 2:
+                raise AOError(f"Killboard API failed: {e}")
+            time.sleep(2 ** attempt)
+
+
+def _kb_since():
+    """Events count from the current balance patch; the last major update when the store has too few since then."""
+    from . import patchnotes
+    try:
+        return patchnotes.current_patch()[0], patchnotes.last_major()[0]
+    except AOError:
+        return None, None
+
+
+def _events(server, pages, since=None):
+    """Kill events of a server, newest first: the newest `pages` pages are fetched (stopping at already stored ones) and
+    added to a local store, then every stored event since the current patch is returned — the sample grows with use instead
+    of being the API's last ~1000 kills. KB_INFO says what was used."""
     host = GAMEINFO.get(server)
     if not host:
         raise AOError(f"server must be one of {list(GAMEINFO)}")
-    out = []
-    for i in range(pages):
-        url = f"https://{host}.albiononline.com/api/gameinfo/events?limit=51&offset={i * 51}"
-        hit = _kb_cache.get(url)
-        if hit and time.time() - hit[0] < 300:
-            out += hit[1]
-            continue
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "ao-db (github.com/valorouscat/ao-db)"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                data = json.load(r)
-        except Exception as e:
-            if out:
-                break
-            raise AOError(f"Killboard API failed: {e}")
-        _kb_cache[url] = (time.time(), data)
-        out += data
-    return out
+    new, warn = 0, None
+    with closing(_kb()) as con:
+        last = (con.execute("SELECT at FROM fetched WHERE server=?", (server,)).fetchone() or (0,))[0]
+        if time.time() - last > KB_FRESH:
+            try:
+                for i in range(pages):
+                    data = _kb_page(f"https://{host}.albiononline.com/api/gameinfo/events?limit=51&offset={i * 51}")
+                    rows = [(server, e["EventId"], e.get("TimeStamp") or "", json.dumps(_slim(e))) for e in data if e.get("EventId")]
+                    with con:
+                        before = con.total_changes
+                        con.executemany("INSERT OR IGNORE INTO events VALUES (?,?,?,?)", rows)
+                        added = con.total_changes - before
+                    new += added
+                    if not data or (i and added == 0):  # reached events stored by an earlier run
+                        break
+                with con:
+                    con.execute("INSERT OR REPLACE INTO fetched VALUES (?,?)", (server, time.time()))
+            except AOError as e:
+                warn = str(e)
+        patch, major = _kb_since()
+        stored = con.execute("SELECT COUNT(*) FROM events WHERE server=?", (server,)).fetchone()[0]
+        if since is None:
+            since = patch
+            if patch and major and con.execute("SELECT COUNT(*) FROM events WHERE server=? AND ts>=?", (server, patch)).fetchone()[0] < KB_MIN_SINCE_PATCH:
+                since = major
+        evs = [json.loads(d) for d, in con.execute("SELECT data FROM events WHERE server=? AND ts>=? ORDER BY ts DESC LIMIT ?",
+                                                   (server, since or "", KB_MAX))]
+    if not evs:
+        raise AOError(f"Killboard API failed and no stored events: {warn}" if warn else "No killboard events stored")
+    KB_INFO.clear()
+    KB_INFO.update(since=since, events=len(evs), new=new, stored=stored, warning=warn,
+                   oldest=evs[-1]["TimeStamp"][:10], newest=evs[0]["TimeStamp"][:10])
+    return evs
+
+
+def kb_line():
+    """One line describing the killboard sample of the last _events call, for tool outputs."""
+    i = KB_INFO
+    if not i:
+        return ""
+    return (f"_Killboard sample: {i['events']} events {i['oldest']} … {i['newest']}" + (f" (since {i['since']})" if i["since"] else "")
+            + f", {i['new']} new this run, {i['stored']} stored locally" + (f"; ⚠ API: {i['warning']} — stored events used" if i["warning"] else "") + "._")
 
 
 def _family(t):
@@ -323,7 +396,7 @@ def meta_builds(weapon=None, server="europe", pages=10, min_ip=0, top=12):
                         t = (eq.get(s) or {}).get("Type")
                         if t:
                             slots[s][_family(t)] += 1
-    o = [f"## Killboard meta — {server}, last {len(evs)} kill events (open world PvP, official API)", ""]
+    o = [f"## Killboard meta — {server}, {len(evs)} kill events (open world PvP, official API)", kb_line(), ""]
     fams = [f for f, _ in kills.most_common(top)]
     if wfam and wfam not in fams and wfam in kills:
         fams.append(wfam)

@@ -421,6 +421,32 @@ class MarketCache(unittest.TestCase):
         self.assertTrue(all(len(u) < 3300 for u in self.urls))
 
 
+class KillboardStore(unittest.TestCase):
+    def test_accumulates_without_duplicates(self):
+        d = tempfile.mkdtemp()
+        ev = lambda i: {"EventId": i, "TimeStamp": f"2099-01-01T00:{i % 60:02d}:00Z", "numberOfParticipants": 1, "Participants": [{"x": 1}],
+                        "Killer": {"AverageItemPower": 1200, "Equipment": {"MainHand": {"Type": "T6_2H_BOW", "Quality": 2}}},
+                        "Victim": {"AverageItemPower": 1100, "Equipment": {"MainHand": {"Type": "T6_MAIN_SWORD", "Quality": 1}}}}
+        pages = {0: [ev(i) for i in range(10, 5, -1)], 51: [ev(i) for i in range(5, 0, -1)]}
+        with mock.patch.object(advisor, "KB_DB", os.path.join(d, "kb.sqlite")), \
+                mock.patch.object(advisor, "_kb_page", lambda url: pages.get(int(url.rsplit("=", 1)[1]), [])), \
+                mock.patch.object(advisor, "_kb_since", lambda: ("2098-01-01", None)):
+            self.assertEqual(len(advisor._events("europe", 2)), 10)
+            pages[0] = [ev(i) for i in range(12, 7, -1)]                     # 2 new events on top of 3 stored ones
+            with mock.patch.object(advisor, "KB_FRESH", -1):
+                evs = advisor._events("europe", 2)
+            self.assertEqual(len(evs), 12)
+            self.assertEqual(advisor.KB_INFO["new"], 2)
+            self.assertNotIn("Participants", evs[0])                          # slim events only
+            self.assertEqual(pvp._fight_scale(evs[0]), "solo")
+
+    def test_weighted_ci(self):
+        m, half = pvp.weighted_ci([1.0, 0.0], [10, 10])
+        self.assertAlmostEqual(m, 0.5)
+        self.assertGreater(half, pvp.weighted_ci([1.0, 0.0], [1000, 1000])[1])  # more fights → narrower range
+        self.assertEqual(pvp.weighted_ci([0.7, 0.7], [3, 5])[1], 0.0)
+
+
 class Cli(unittest.TestCase):
     def test_help_and_quantity_words(self):
         from aodb import cli

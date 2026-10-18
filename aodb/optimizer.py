@@ -3,7 +3,7 @@ the content's monsters (encounter simulation) and against the killboard meta at 
 priced with the cheapest tier/enchant reaching each IP level, ranked by score and by score per silver within budget bands.
 """
 import math, statistics
-from . import core, combat, encounter, gearcheck, market, pvp
+from . import advisor, core, combat, encounter, gearcheck, market, pvp
 from .core import AOError, q, q1, label, money, table
 
 # armor kits: (name, [(slot item family, active spell, passive spell)])
@@ -119,14 +119,14 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         me = pvp.build_pvp_player(lo, spec, rules)
         tw = sum(w for _, w in field)
         duels = [(pvp.duel(me, o), w) for o, w in field]
-        win = sum(d["win"] * w for d, w in duels) / tw
+        win, win_ci = pvp.weighted_ci([d["win"] for d, _ in duels], [w for _, w in duels])
         live = 1 - sum(d["lose"] * w for d, w in duels) / tw
         est = [price_of(e["item"]) + (e.get("stack") or 1,) for e in lo["equipment"]]
         missing = sum(1 for pr, _, _ in est if pr is None)
         estimated = sum(1 for pr, flag, _ in est if pr is not None and flag)
         cost = sum((pr or 0) * n for pr, _, n in est)
         return {"wfam": wfam, "kit": kit[0], "level": level, "loadout": lo, "pve": pve, "win": win, "live": live, "cost": cost,
-                "missing": missing, "estimated": estimated, "spells": [s for sl, s in me["spells"] if sl == "mainhand"]}
+                "missing": missing, "estimated": estimated, "win_ci": win_ci, "spells": [s for sl, s in me["spells"] if sl == "mainhand"]}
 
     # stage 1: every weapon × kit at the middle level; stage 2: the shortlist at every level
     mid = levels[len(levels) // 2]
@@ -162,7 +162,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         p = r["pve"]
         names = ", ".join((q1("SELECT name_en FROM spells WHERE id=?", s) or {"name_en": s})["name_en"] for s in r["spells"])
         return (r["loadout"]["name"].split(" · ")[0], r["kit"], f"{r['level']} (+{spec_ip})", ("~" if r.get("estimated") else "") + money(r["cost"]),
-                f"{p['low']:.0%} / {p['low_pess']:.0%}", f"{p['elite']:.0%}", f"{p['fame_h'] / 1e6:.2f}M", f"{r['win']:.0%}",
+                f"{p['low']:.0%} / {p['low_pess']:.0%}", f"{p['elite']:.0%}", f"{p['fame_h'] / 1e6:.2f}M", pvp.pct_ci(r["win"], r["win_ci"]),
                 f"{1 - r['live']:.0%}", f"{r['score']:.2f}", f"{r.get('eff', 0):.2f}", names)
     hdr = ["weapon", "armor kit", "base IP", "cost", "camps lowest HP @90/@50", "elite kills (worst camp)", "fame/h", "PvP win", "PvP die",
            "score", "score / 100k", "Q / W / E"]
@@ -199,4 +199,5 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     o.append(f"\n_IP = base item power of the gear + {spec_ip} assumed from mastery (pass spec_ip). Camp numbers are calibrated on "
              "the real-outcome journal; PvP is the duel model vs open-world killboard builds — skill, positioning and cooldown "
              "timing are not modelled. Spells: picked for PvP per slot (damage, CC, escapes)._")
+    o.append(advisor.kb_line())
     return "\n".join(o)
