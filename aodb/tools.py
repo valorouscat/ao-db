@@ -166,7 +166,13 @@ TOOLS = [
                      server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
                      pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10),
                      budget=P(I, "Max re-gear cost in silver: one band up to it instead of the fixed bands"),
-                     top=P(I, "Builds shown per budget band", 4))),
+                     top=P(I, "Builds shown per budget band", 4),
+                     profile=P(S, "What the score rewards: balanced (35% camps, 10% fame/h, 40% PvP win, 15% PvP escape), farm "
+                                  "(camps + fame/h, escape players), hunter (winning fights), survivor (never losing the bag)",
+                               "balanced", enum=["balanced", "farm", "hunter", "survivor"]),
+                     weights=P(S, "Override profile weights: 'pvp_win=0.6,pve_safe=0.2' (keys pve_safe, pve_speed, pvp_win, "
+                                  "pvp_live; normalised to sum 1)"),
+                     distinct=P(B, "One row per weapon (its best armor kit and IP level)", False))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "

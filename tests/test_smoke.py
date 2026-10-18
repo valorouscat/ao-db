@@ -336,6 +336,14 @@ class Encounters(unittest.TestCase):
         self.assertTrue(market._absurd("T8_POTION_CLEANSE", 13_000_000))           # troll listing
         self.assertFalse(market._absurd("T8_POTION_CLEANSE", 15_000))
 
+    def test_optimizer_weights(self):
+        w = optimizer._weights("hunter", "pvp_win=1,pve_safe=0,pve_speed=0,pvp_live=0")
+        self.assertEqual(w["pvp_win"], 1.0)
+        self.assertAlmostEqual(sum(optimizer._weights("farm", None).values()), 1.0)
+        for bad in (("nope", None), ("balanced", "speed=1"), ("balanced", "pvp_win=x")):
+            with self.assertRaises(core.AOError):
+                optimizer._weights(*bad)
+
     def test_fight_and_sim(self):
         p = gearcheck.build_player(self.BOW, {"avg_ip": 1250})
         strong, weak = encounter.Fighter(p, 3.0), encounter.Fighter(p, 0.5)

@@ -29,6 +29,33 @@ ARTIFACT_TAGS = ("_HELL", "_UNDEAD", "_KEEPER", "_AVALON", "_MORGANA", "_CRYSTAL
 LEVELS = (800, 900, 1000, 1100, 1200)       # base item power of the gear
 BANDS = ((0, 150_000), (150_000, 300_000), (300_000, 600_000), (600_000, 1_200_000), (1_200_000, 10 ** 12))
 WEIGHTS = {"pve_safe": 0.35, "pve_speed": 0.10, "pvp_win": 0.40, "pvp_live": 0.15}
+PROFILES = {  # what the score rewards: camp safety, fame/h, winning fights, getting away from lost ones
+    "balanced": WEIGHTS,
+    "farm": {"pve_safe": 0.45, "pve_speed": 0.25, "pvp_win": 0.10, "pvp_live": 0.20},     # clear camps fast, escape players
+    "hunter": {"pve_safe": 0.15, "pve_speed": 0.05, "pvp_win": 0.60, "pvp_live": 0.20},   # look for fights
+    "survivor": {"pve_safe": 0.35, "pve_speed": 0.05, "pvp_win": 0.20, "pvp_live": 0.40},  # never lose the bag
+}
+
+
+def _weights(profile, weights):
+    """Score weights of a profile, overridden by 'pvp_win=0.6,pve_safe=0.2', normalised to sum 1."""
+    if profile not in PROFILES:
+        raise AOError(f"profile must be one of {', '.join(PROFILES)}")
+    w = dict(PROFILES[profile])
+    for part in (weights or "").replace(";", ",").split(","):
+        if part.strip():
+            k, _, v = part.partition("=")
+            k = k.strip()
+            if k not in w:
+                raise AOError(f"Unknown weight {k!r}; use {', '.join(w)}")
+            try:
+                w[k] = max(float(v), 0.0)
+            except ValueError:
+                raise AOError(f"Weight {k} needs a number: {part!r}")
+    tot = sum(w.values())
+    if not tot:
+        raise AOError("Weights sum to 0")
+    return {k: v / tot for k, v in w.items()}
 
 
 def weapon_families(classes):
@@ -60,8 +87,9 @@ def _loadout(wfam, kit, level, cheap):
 
 
 def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100, server="europe", city="Caerleon", pages=20,
-                    shortlist=10, levels=None, budget=None, top=4):
+                    shortlist=10, levels=None, budget=None, top=4, profile="balanced", weights=None, distinct=False):
     """Rank builds for a PvPvE content by score and by score per silver, in budget bands."""
+    W = _weights(profile, weights)
     key = encounter.resolve(content)
     title, kind, dtier, zone, continent = encounter.CONTENT[key]
     tier = int(tier or dtier)
@@ -136,8 +164,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     def score(r):
         p = r["pve"]
         safe = 0.55 * p["low"] + 0.30 * p["low_pess"] + 0.15 * (1 - p["elite"])
-        return (WEIGHTS["pve_safe"] * safe + WEIGHTS["pve_speed"] * min(p["fame_h"] / fame_max, 1)
-                + WEIGHTS["pvp_win"] * r["win"] + WEIGHTS["pvp_live"] * r["live"])
+        return W["pve_safe"] * safe + W["pve_speed"] * min(p["fame_h"] / fame_max, 1) + W["pvp_win"] * r["win"] + W["pvp_live"] * r["live"]
     for r in stage1:
         r["score"] = score(r)
     best = sorted(stage1, key=lambda r: -r["score"])
@@ -158,6 +185,18 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     for r in priced:
         r["eff"] = r["score"] / (r["cost"] / 100_000)
 
+    def pick(rows, key, n):
+        """Best n rows by key; with distinct, only each weapon's best row (its best armor kit and IP level)."""
+        out, seen = [], set()
+        for r in sorted(rows, key=key):
+            if distinct and r["wfam"] in seen:
+                continue
+            seen.add(r["wfam"])
+            out.append(r)
+            if len(out) >= n:
+                break
+        return out
+
     def row(r):
         p = r["pve"]
         names = ", ".join((q1("SELECT name_en FROM spells WHERE id=?", s) or {"name_en": s})["name_en"] for s in r["spells"])
@@ -171,20 +210,20 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
          f"Each build: camps simulated second by second (encounter_sim, 4 maps), duels vs the {rules['scale']}-fight killboard "
          f"meta ({nev} recent open-world kills, {len(field)} builds at their own IP"
          + (f", capped at {rules['cap']:.0f}" if rules["cap"] else "") + "), priced with the cheapest tier/enchant of every item "
-         f"at the level ({city}) + consumables {money(cons_cost)}. Score = {WEIGHTS['pve_safe']:.0%} camp safety + "
-         f"{WEIGHTS['pve_speed']:.0%} fame/h + {WEIGHTS['pvp_win']:.0%} PvP win + {WEIGHTS['pvp_live']:.0%} PvP survival."]
+         f"at the level ({city}) + consumables {money(cons_cost)}. Score ({profile}) = {W['pve_safe']:.0%} camp safety + "
+         f"{W['pve_speed']:.0%} fame/h + {W['pvp_win']:.0%} PvP win + {W['pvp_live']:.0%} PvP survival."]
     if warn:
         o.append(f"_Prices incomplete: {'; '.join(warn)}_")
     for lo_b, hi_b in [(0, budget + 1)] if budget else BANDS:
         band = [r for r in priced if lo_b <= r["cost"] < hi_b]
         if not band:
             continue
-        best_band = sorted(band, key=lambda r: -r["score"])[:top]
+        best_band = pick(band, lambda r: -r["score"], top)
         rng = (f"≤ {money(budget)}" if budget else f"{money(lo_b)}–{money(hi_b)}") if hi_b < 10 ** 12 else f"{money(lo_b)}+"
         o.append(f"\n### Budget {rng}\n" + table([row(r) for r in best_band], hdr))
         o.append("Buy (leader): " + ", ".join(f"`{e['item']}`" + (f" ×{e['stack']}" if e.get("stack", 1) > 1 else "")
                                                for e in best_band[0]["loadout"]["equipment"]))
-    eff = sorted(priced, key=lambda r: -r["eff"])[:5]
+    eff = pick(priced, lambda r: -r["eff"], 5)
     o.append("\n### Best value (score per 100k silver, any budget)\n" + table([row(r) for r in eff], hdr))
     top = max(priced, key=lambda r: r["score"]) if priced else None
     if top:

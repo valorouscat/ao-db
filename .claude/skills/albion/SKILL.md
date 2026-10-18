@@ -45,6 +45,9 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      `farm_plan` (where to farm: win/death chance vs the meta, expected re-gear loss/h, break-even silver/h). The public
      killboard covers open-world kills only — say it is a proxy for instanced content. Fights/hour are assumptions: ask the
      user for their real numbers and pass `encounters_per_hour` / `silver_per_hour`.
+   - Build ranking for PvPvE content within a budget: `build_optimizer` with `budget`, `distinct` (one row per weapon) and a
+     `profile` matching the user's goal — farm (camps + escape), hunter (fights), survivor (never lose the bag), balanced —
+     or explicit `weights`. Quote PvP win rates with their ± range and the killboard sample line.
    - Monster fights in detail: `encounter_sim` (corrupted dungeon maps, Mists camps / dungeon, hellgate PvE) and `camp_sim`
      (Roads camps) fight every pull second by second → clear time, lowest HP (both dodge scenarios), failed pulls, elite risk,
      fame/hour, hardest pull. Name the hardest pull and heavy hits in the answer; times are calibrated only if the journal has
