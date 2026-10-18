@@ -110,6 +110,15 @@ def _chest_lists(chest, tier):
     return out
 
 
+# Roads of Avalon chest colours (confirmed by the project owner): green = solo, blue = groups up to 5, gold = 5+.
+# Mapped onto the chest name's group level: SOLO / VETERAN / ELITE.
+GROUP_COLOUR = {"SOLO": "green (solo)", "VETERAN": "blue (≤5)", "ELITE": "gold (5+)"}
+
+
+def _colour(name):
+    return next((c for k, c in GROUP_COLOUR.items() if f"_{k}_" in f"_{name}_"), "")
+
+
 def chest_value(query, tier=8, live=False, server="europe", city="Caerleon", top=8):
     rows = q("SELECT * FROM chests WHERE name LIKE ? OR chesttype = ? ORDER BY name", f"%{query}%", query)
     if not rows:
@@ -155,8 +164,8 @@ def chest_value(query, tier=8, live=False, server="europe", city="Caerleon", top
         summary.append((name, ctype, total, nitems, d.get("@triggermobspawn") == "true", ps))
     summary.sort(key=lambda r: -r[2])
     best = summary[0][2] if summary and summary[0][2] else 1
-    o.append(table([(n, t, f"{100 * v / best:.0f}", money(v), f"{c:.2f}", "yes" if m else "") for n, t, v, c, m, _ in summary],
-                   ["chest", "type", "value index (best=100)", "model value", "model items", "spawns mobs"]))
+    o.append(table([(n, _colour(n), t, f"{100 * v / best:.0f}", money(v), f"{c:.2f}", "yes" if m else "") for n, t, v, c, m, _ in summary],
+                   ["chest", "colour / group", "type", "value index (best=100)", "model value", "model items", "spawns mobs"]))
     for name, ctype, total, _, _, ps in summary[:6]:
         o.append(f"\n### {name}")
         o.append(table([(st, f"{share:.0%}", ln, money(sum(n * val(i) for i, n in exp.items()))) for st, share, ln, exp in ps],
