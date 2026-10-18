@@ -180,7 +180,9 @@ TOOLS = [
                      distinct=P(B, "One row per weapon (its best armor kit and IP level)", False),
                      kits=P(S, "Armor kits: both (5 fixed + the killboard's most worn head · armor · shoes sets), fixed, meta",
                             "both", enum=["both", "fixed", "meta"]),
-                     meta_kit_count=P(I, "How many killboard kits to add", 3))),
+                     meta_kit_count=P(I, "How many killboard kits to add", 3),
+                     meta_consumable_count=P(I, "Killboard food + potion sets tried on the shortlist (0 = only Roast Pork + "
+                                                "Healing Potion)", 3))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "

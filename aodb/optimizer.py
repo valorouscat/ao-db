@@ -82,6 +82,37 @@ def meta_kits(scale, server="europe", pages=20, n=3, fixed=KITS):
     return out
 
 
+ESCAPE_POTION = ("T8_POTION_CLEANSE", 1)  # invisibility potion in the bag: kept in every set (the killboard shows only the slots)
+
+
+def meta_consumables(scale, server="europe", pages=20, n=3):
+    """The n food + potion pairs most used by killers at a fight scale (2+ kills, not the default set):
+    [(label, [(item, stack)], kills)]; each set also carries the invisibility potion."""
+    pairs = Counter()
+    for e in advisor._events(server, max(1, min(pages, 20))):
+        if pvp._fight_scale(e) != scale:
+            continue
+        eq = (e.get("Killer") or {}).get("Equipment") or {}
+        f, p = ((eq.get(s_) or {}).get("Type") for s_ in ("Food", "Potion"))
+        if f and p and q1("SELECT 1 FROM items WHERE id=?", f) and q1("SELECT 1 FROM items WHERE id=?", p):
+            pairs[(f, p)] += 1
+    default = tuple(i for i, _ in CONSUMABLES[:2])
+    out = []
+    for (f, p), kills in pairs.most_common():
+        if len(out) >= n or kills < 2:
+            break
+        if (f, p) == default:
+            continue
+        out.append((f"{_short(f)} + {_short(p)}", [(f, 3), (p, 3)] + ([ESCAPE_POTION] if p != ESCAPE_POTION[0] else []), kills))
+    return out
+
+
+def _short(item):
+    """'Beef Stew 8.0', 'Healing Potion 6.1' — the label without its ID and Minor/Major prefix."""
+    n = label(item).split(" (`")[0]
+    return n.split(" ", 1)[1] if n.split(" ", 1)[0] in ("Minor", "Major") else n
+
+
 def _weights(profile, weights):
     """Score weights of a profile, overridden by 'pvp_win=0.6,pve_safe=0.2', normalised to sum 1."""
     if profile not in PROFILES:
@@ -116,7 +147,7 @@ def _variant_at(fam, level):
             if gearcheck.advisor._family(r["id"]) == fam]
 
 
-def _loadout(wfam, kit, level, cheap):
+def _loadout(wfam, kit, level, cheap, cons=None):
     """Concrete loadout at a base IP level, using the cheapest priced variant of every item."""
     pick = lambda fam: cheap.get((fam, level)) or (_variant_at(fam, level) or [f"T6_{fam}"])[0]
     w = pick(wfam)
@@ -126,14 +157,14 @@ def _loadout(wfam, kit, level, cheap):
     for fam, act, pas in kit[1]:
         eq.append({"item": pick(fam), "activeSpells": [act] if act else [], "passiveSpells": [pas] if pas else []})
     eq.append({"item": pick(kit[2] if len(kit) > 2 else "CAPE")})
-    eq += [{"item": i, "stack": n} for i, n in CONSUMABLES]
+    eq += [{"item": i, "stack": n} for i, n in (cons or CONSUMABLES)]
     return {"name": f"{core.q1('SELECT name_en FROM items WHERE id=?', 'T4_' + wfam)['name_en'].replace('Adept' + chr(39) + 's ', '')} · {kit[0]}",
             "equipment": eq}
 
 
 def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100, server="europe", city="Caerleon", pages=20,
                     shortlist=10, levels=None, budget=None, top=4, profile="balanced", weights=None, distinct=False, kits="both",
-                    meta_kit_count=3):
+                    meta_kit_count=3, meta_consumable_count=3):
     """Rank builds for a PvPvE content by score and by score per silver, in budget bands."""
     W = _weights(profile, weights)
     key = encounter.resolve(content)
@@ -151,10 +182,12 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     if kits == "meta" and not meta:
         raise AOError("No head · armor · shoes set with 2+ kills at this fight size on the killboard; use kits=both")
     kitlist = (KITS if kits != "meta" else []) + meta
+    conslist = [(f"{_short(CONSUMABLES[0][0])} + {_short(CONSUMABLES[1][0])}", CONSUMABLES, None)] + (
+        meta_consumables(rules["scale"], server, pages, meta_consumable_count) if meta_consumable_count else [])
     # prices: every variant of every item at every level, in one request
     fams = set(wfams) | {f for k in kitlist for f, _, _ in k[1]} | {k[2] for k in meta} | {"OFF_TORCH", "CAPE"}
     var = {(f, lv): _variant_at(f, lv) for f in fams for lv in levels}
-    prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for i, _ in CONSUMABLES}), server, city, estimate=True)
+    prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for c in conslist for i, _ in c[1]}), server, city, estimate=True)
     is_est = lambda i: prices.get(i, (None, ""))[1].startswith("≈") or market.is_thin(prices.get(i, (None, ""))[1])  # guesses
     warn = list(market.WARNINGS)
     cheap = {}
@@ -193,8 +226,8 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     if not field:
         raise AOError("Empty killboard field; raise pages")
 
-    def evaluate(wfam, kit, level):
-        lo = _loadout(wfam, kit, level, cheap)
+    def evaluate(wfam, kit, level, cons=conslist[0]):
+        lo = _loadout(wfam, kit, level, cheap, cons[1])
         spec = {"spec_ip": spec_ip}  # IP from the actual items (artifact bonus included) + mastery
         pve = encounter.pve_summary(lo, key, ip_spec=spec, maps=4) or {"low": 0, "low_pess": 0, "elite": 1, "fame_h": 0, "minutes": 99}
         me = pvp.build_pvp_player(lo, spec, rules)
@@ -206,7 +239,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         missing = sum(1 for pr, _, _ in est if pr is None)
         estimated = sum(1 for pr, flag, _ in est if pr is not None and flag)
         cost = sum((pr or 0) * n for pr, _, n in est)
-        return {"wfam": wfam, "kit": kit[0], "level": level, "loadout": lo, "pve": pve, "win": win, "live": live, "cost": cost,
+        return {"wfam": wfam, "kit": kit[0], "level": level, "loadout": lo, "cons": cons, "pve": pve, "win": win, "live": live, "cost": cost,
                 "missing": missing, "estimated": estimated, "win_ci": win_ci, "duels": [d for d, _ in duels], "spells": [s for sl, s in me["spells"] if sl == "mainhand"]}
 
     # stage 1: every weapon × kit at the middle level; stage 2: the shortlist at every level
@@ -229,9 +262,16 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
             break
     results = list(stage1)
     for r in short:
+        kit = next(k for k in kitlist if k[0] == r["kit"])
+        best_c = r
+        for c in conslist[1:]:  # food + potion sets from the killboard, tried at the middle level; the best one is kept
+            x = evaluate(r["wfam"], kit, mid, c)
+            x["score"] = score(x)
+            results.append(x)
+            best_c = max(best_c, x, key=lambda y: y["score"])
         for lv in levels:
             if lv != mid:
-                x = evaluate(r["wfam"], next(k for k in kitlist if k[0] == r["kit"]), lv)
+                x = evaluate(r["wfam"], kit, lv, best_c["cons"])
                 x["score"] = score(x)
                 results.append(x)
     priced = [r for r in results if r["cost"] and not r["missing"] and (not budget or r["cost"] <= budget)]
@@ -253,18 +293,21 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     def row(r):
         p = r["pve"]
         names = ", ".join((q1("SELECT name_en FROM spells WHERE id=?", s) or {"name_en": s})["name_en"] for s in r["spells"])
-        return (r["loadout"]["name"].split(" · ")[0], r["kit"], f"{r['level']} (+{spec_ip})", ("~" if r.get("estimated") else "") + money(r["cost"]),
+        return (r["loadout"]["name"].split(" · ")[0], r["kit"], r["cons"][0], f"{r['level']} (+{spec_ip})", ("~" if r.get("estimated") else "") + money(r["cost"]),
                 f"{p['low']:.0%} / {p['low_pess']:.0%}", f"{p['elite']:.0%}", f"{p['fame_h'] / 1e6:.2f}M", pvp.pct_ci(r["win"], r["win_ci"]),
                 f"{1 - r['live']:.0%}", f"{r['score']:.2f}", f"{r.get('eff', 0):.2f}", names)
-    hdr = ["weapon", "armor kit", "base IP", "cost", "camps lowest HP @90/@50", "elite kills (worst camp)", "fame/h", "PvP win", "PvP die",
+    hdr = ["weapon", "armor kit", "food + potion", "base IP", "cost", "camps lowest HP @90/@50", "elite kills (worst camp)", "fame/h", "PvP win", "PvP die",
            "score", "score / 100k", "Q / W / E"]
     o = [f"## Build optimizer — {title} T{tier} · {', '.join(cls)} · {len(wfams)} weapons × {len(kitlist)} armor kits × "
          f"{len(levels)} IP levels", "",
          f"Each build: camps simulated second by second (encounter_sim, 4 maps), duels vs the {rules['scale']}-fight killboard "
          f"meta ({nev} recent open-world kills, {len(field)} builds at their own IP"
          + (f", capped at {rules['cap']:.0f}" if rules["cap"] else "") + "), priced with the cheapest tier/enchant of every item "
-         f"at the level ({city}) + consumables {money(cons_cost)}. Score ({profile}) = {W['pve_safe']:.0%} camp safety + "
+         f"at the level ({city}) + consumables ({conslist[0][0]} + invisibility potion: {money(cons_cost)}). Score ({profile}) = {W['pve_safe']:.0%} camp safety + "
          f"{W['pve_speed']:.0%} fame/h + {W['pvp_win']:.0%} PvP win + {W['pvp_live']:.0%} PvP survival."]
+    if len(conslist) > 1:
+        o.append("Killboard food + potion sets (tried on the shortlist, each with an invisibility potion in the bag): " + "; ".join(
+            f"{c[0]} — {c[2]} kills" for c in conslist[1:]))
     if meta:
         o.append("Killboard kits (most worn by " + rules["scale"] + "-fight killers; spells picked for PvP): " + "; ".join(
             f"{k[0].replace(' (killboard)', '')} + {advisor._fam_name(k[2])} — {k[3]} kills, "

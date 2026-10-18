@@ -375,6 +375,22 @@ class Encounters(unittest.TestCase):
         lo = optimizer._loadout("2H_DEMONICSTAFF", kits[0], 900, {})
         self.assertTrue(any("CAPEITEM_FW_MARTLOCK" in e["item"] for e in lo["equipment"]))
 
+    def test_consumable_buffs(self):
+        self.assertAlmostEqual(gearcheck.consumable_buffs("T8_MEAL_STEW")["magicspelldamagebonus"], 0.135)     # food: full value
+        self.assertAlmostEqual(gearcheck.consumable_buffs("T8_MEAL_SANDWICH")["hitpointsmaxbonus"], 0.1553)
+        self.assertAlmostEqual(gearcheck.consumable_buffs("T7_POTION_REVIVE")["hitpointsmaxbonus"], 1.19 * 6 / 15)  # 6 s of 15
+        self.assertGreater(gearcheck.consumable_buffs("T7_MEAL_OMELETTE")["magicspelldamagebonus"], 0)       # CDR → damage
+        self.assertEqual(gearcheck.consumable_buffs("T5_MEAL_SOUP"), {})                                    # out of combat only
+        lo = lambda cons: {"equipment": [{"item": "T6_2H_DEMONICSTAFF"}, {"item": "T6_ARMOR_CLOTH_SET2"}] + [{"item": c} for c in cons]}
+        plain, sand = (gearcheck.build_player(lo(c), {"avg_ip": 1000})["hp"] for c in ([], ["T8_MEAL_SANDWICH"]))
+        self.assertAlmostEqual(sand / plain, 1.1553, places=3)
+        kb = [{"numberOfParticipants": 1, "Killer": {"Equipment": {"Food": {"Type": "T8_MEAL_STEW"}, "Potion": {"Type": p}}}}
+              for p in ["T7_POTION_REVIVE"] * 3 + ["T6_POTION_HEAL"]]
+        with mock.patch.object(advisor, "_events", lambda *a, **k: kb):
+            sets = optimizer.meta_consumables("solo")
+        self.assertEqual([(c[0], c[2]) for c in sets], [("Beef Stew 8.0 + Gigantify Potion 7.0", 3)])  # 1-kill pair skipped
+        self.assertIn(optimizer.ESCAPE_POTION, sets[0][1])
+
     def test_optimizer_weights(self):
         w = optimizer._weights("hunter", "pvp_win=1,pve_safe=0,pve_speed=0,pvp_live=0")
         self.assertEqual(w["pvp_win"], 1.0)

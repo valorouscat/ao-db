@@ -123,6 +123,7 @@ class Fighter:
         self.invuln = min(d["invuln_frac"], 0.3)
         self.hp = p["hp"]
         self.res = p["res"]
+        self.defense = min(p["stats"].get("bonusdefensevsmobs", 0) or 0, 0.6)  # items + resistance potion
         self.ranged = p["ranged"]
 
     @functools.lru_cache(maxsize=None)
@@ -146,7 +147,7 @@ def fight(f, pull, dodge):
         for _ in range(k):
             mobs.append({"hp": m["hp"], "mit": mit or 1.0, "dps": gearcheck.mob_dps(m, dodge, f.ranged)})
     hp, low, t = f.hp, f.hp, 0.0
-    taken_mit = combat.mitigation(f.res)
+    taken_mit = combat.mitigation(f.res) * (1 - f.defense)
     while mobs and t < MAX_FIGHT:
         alive = len(mobs)
         focus, splash = f.dps(alive)

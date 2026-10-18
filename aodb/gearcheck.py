@@ -455,6 +455,36 @@ def progression():
     return _prog
 
 
+POTION_WINDOW = 15.0  # seconds a fight is decided in: a short potion buff counts for its share of that window
+DMG_STATS = ("physicalspelldamagebonus", "magicspelldamagebonus", "physicalattackdamagebonus", "magicattackdamagebonus")
+
+
+@functools.lru_cache(maxsize=None)
+def consumable_buffs(item_id):
+    """Stat buffs of a food / potion from its consume spell's buffovertime: {stat: value weighted by uptime}. Food (30 min)
+    counts fully, a short potion buff for min(duration / POTION_WINDOW, 1); staged values (0.88 then 0.77) count at the top
+    stage. Cooldown / cast-time reduction is turned into an equivalent damage bonus (spells are ~60% of a kit's damage)."""
+    cs = core.item_json(item_id).get("@consumespell")
+    s = q1("SELECT json FROM spells WHERE id=?", cs) if cs else None
+    if not s:
+        return {}
+    b = json.loads(s["json"]).get("buffovertime") or []
+    top = {}
+    for x in b if isinstance(b, list) else [b]:
+        if x.get("@target") not in ("self", "friendall", None):
+            continue
+        t, v, dur = x.get("@type"), combat.num(x.get("@value")) or 0, combat.num(x.get("@time")) or 0
+        w = 1.0 if dur >= 600 else min(dur / POTION_WINDOW, 1.0)
+        top[t] = max(top.get(t, 0.0), v * w)
+    out = {k: v for k, v in top.items() if k in DMG_STATS + ("hitpointsmaxbonus", "bonusdefensevsplayers", "bonusdefensevsmobs")}
+    cdr, cast = top.get("magiccooldownreduction", 0.0), top.get("magiccasttimereduction", 0.0)
+    if cdr or cast:
+        eq = 0.6 * (1 / (1 - min(cdr, 0.5)) - 1) + 0.2 * cast
+        for k in DMG_STATS:
+            out[k] = out.get(k, 0.0) + eq
+    return out
+
+
 def player_stats(entries, rows, given_hp=None):
     """Character stats from the equipped items: each item stat scaled by its slot's ItemPowerProgression for that item's IP
     (incl. quality and mastery). HP = 1200 base + head/armor/shoes share bonus + items' flat max health."""
@@ -479,10 +509,24 @@ def player_stats(entries, rows, given_hp=None):
             v = combat.num(d.get("@" + stat)) or 0
             if v:
                 st[stat] += v * (combat.num(prog.get(stat)) or 1) ** steps
+    st["bonusdefensevsplayers"] = st.get("bonusdefensevsplayers", 0.0)
+    hp_pct, cons = 0.0, []
+    for e in entries:  # food and potions: damage, max HP, defense buffs (an in-game HP value already includes eaten food)
+        if e["row"]["slot"] in ("food", "potion") or (e["inventory"] and e["row"]["slot"] in ("food", "potion")):
+            for k, v in consumable_buffs(e["id"]).items():
+                if k == "hitpointsmaxbonus":
+                    hp_pct += v
+                else:
+                    st[k] = st.get(k, 0.0) + v
+            if consumable_buffs(e["id"]):
+                cons.append(e["id"])
+    hp_pct = min(hp_pct, 0.5)
     armor_hp = sum(shares.get(slot, 0) * ARMOR_HP_1000 * 1.06 ** ((ips[slot] - 1000) / 100) for slot in ("head", "armor", "shoes") if slot in ips)
-    hp = BASE_HP + armor_hp + st["hitpointsmax"]
+    hp = (BASE_HP + armor_hp + st["hitpointsmax"]) * (1 + hp_pct)
     st["hp"] = float(given_hp) if given_hp else hp
-    st["hp_source"] = "in-game value" if given_hp else f"1200 base + {armor_hp:,.0f} armor share + {st['hitpointsmax']:,.0f} items"
+    st["hp_source"] = "in-game value" if given_hp else (f"1200 base + {armor_hp:,.0f} armor share + {st['hitpointsmax']:,.0f} items"
+                                                        + (f" × {1 + hp_pct:.2f} consumables" if hp_pct else ""))
+    st["consumables"] = cons
     return st
 
 
