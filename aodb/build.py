@@ -44,6 +44,8 @@ CREATE TABLE loot(list TEXT, kind TEXT, target TEXT, amount TEXT, chance REAL, e
 CREATE INDEX loot_list ON loot(list);
 CREATE INDEX loot_target ON loot(target);
 
+CREATE TABLE loot_raw(name TEXT PRIMARY KEY, json TEXT);
+CREATE TABLE chests(name TEXT PRIMARY KEY, chesttype TEXT, faction TEXT, json TEXT);
 CREATE TABLE clusters(idx TEXT PRIMARY KEY, name TEXT, file TEXT, type TEXT, biome TEXT, tier INT, zone TEXT);
 CREATE VIRTUAL TABLE clusters_fts USING fts5(idx, name, file, tokenize='unicode61');
 
@@ -271,11 +273,18 @@ class Builder:
                         rows.append((listname, "silver", "SILVER", ch.get("@amount") or ch.get("@maxamount"), c, None))
                     walk(listname, ch, c)
 
+        raws = []
         for fname in ("loot.json",):
             d = load(self.repo, fname)["LootDefinition"]
             for ll in aslist(d.get("Lootlist")):
                 walk(ll["@name"], ll)
+                raws.append((ll["@name"], json.dumps(ll, ensure_ascii=False)))
         self.db.executemany("INSERT INTO loot VALUES(?,?,?,?,?,?)", rows)
+        self.db.executemany("INSERT OR REPLACE INTO loot_raw VALUES(?,?)", raws)
+        lc = load(self.repo, "lootchests.json")["LootChests"]
+        self.db.executemany("INSERT OR REPLACE INTO chests VALUES(?,?,?,?)",
+                            [(c["@uniquename"], c.get("@chesttype"), c.get("@faction"), json.dumps(c, ensure_ascii=False))
+                             for c in aslist(lc.get("LootChest")) if isinstance(c, dict) and "@uniquename" in c])
         self.log("loot rows", len(rows))
 
     # ---------------------------------------------------------------- clusters

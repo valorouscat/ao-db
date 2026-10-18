@@ -4,7 +4,7 @@ Used by both the CLI (aodb.cli) and the MCP server (aodb.mcp_server).
 Item / mob / spell arguments accept an ID (T4_MAIN_SWORD, T4_MAIN_SWORD@2), a name in
 any game language ("Broadsword", "Палаш") and an optional tier prefix ("6.1 палаш", "T8 bow").
 """
-import json, os, re, sqlite3, html as H
+import functools, json, os, re, sqlite3, html as H
 from collections import defaultdict
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -205,6 +205,7 @@ def returnable(maxreturn):
     return maxreturn is None or maxreturn > 0
 
 
+@functools.lru_cache(maxsize=None)
 def item_value(iid, _depth=0):
     """Game 'item value' (basis of station fees): own @itemvalue or sum over recipe resources."""
     v = num(item_json(iid).get("@itemvalue"))

@@ -33,8 +33,10 @@ def schema_for(t):
     return {"type": "object", "properties": props, "required": req, "additionalProperties": False}
 
 
+OPEN_WORLD = {"price", "history", "best_city", "craft_profit", "build_cost", "meta_builds"}
 TOOL_LIST = [{"name": t["name"], "description": t["desc"], "inputSchema": schema_for(t),
-              "annotations": {"readOnlyHint": t["name"] != "html", "openWorldHint": t["fn"].__module__.endswith("market")}}
+              "annotations": {"readOnlyHint": t["name"] not in ("html", "save_note"),
+                              "openWorldHint": t["name"] in OPEN_WORLD}}
              for t in TOOLS]
 
 

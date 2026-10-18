@@ -1,5 +1,5 @@
 """Single registry of operations. The CLI and the MCP server are both generated from it."""
-from . import core, market
+from . import advisor, core, market
 
 S, I, N, B, A = "string", "integer", "number", "boolean", "array"
 Q_ITEM = "Item ID (T4_MAIN_SWORD@2) or name in any language, optional tier prefix ('6.1 broadsword', 'T8 палаш')"
@@ -76,6 +76,34 @@ TOOLS = [
                      return_rate=P(N, "Return rate % (default 15.2, or 43.5 with focus)"), focus=P(B, "Use focus", False),
                      station_fee=P(N, "Station usage fee per 100 nutrition", 0), premium=P(B, "Premium (4% tax vs 8%)", True),
                      qty=P(N, "Items to craft", 1), recipe_no=P(I, "Alternative recipe index", 0), days=P(I, "Days for average fallback", 7))),
+    dict(name="build_cost", fn=advisor.build_cost,
+         desc="Estimated cost of a gear set from live prices (per slot + total), base item power, and the same set at .0-.3 enchant. "
+              "Use whenever gear is recommended or discussed. Consumables: '10x T8_MEAL_STEW'.",
+         params=dict(items=P(A, "Items of the build (IDs/names, optional 'Nx' quantity)", required=True),
+                     server=P(S, "Game server", "europe", enum=list(market.SERVERS)), city=P(S, "Market city", "Caerleon"),
+                     quality=P(I, "1 normal … 5 masterpiece", 1), compare_enchants=P(B, "Add .0-.3 comparison", True))),
+    dict(name="chest_value", fn=advisor.chest_value,
+         desc="Expected loot value of chests (Avalon roads, corrupted dungeons, hellgates, mists, static dungeons, treasure...) computed "
+              "through the loot tables; ranks chests so you can tell which are worth opening.",
+         params=dict(query=P(S, "Chest name part (AVALON, ROAD, CORRUPTED...) or chest type (avaroadloot, rdsololoot, cdboss...)", required=True),
+                     tier=P(I, "Content tier (4-8)", 8), live=P(B, "Use live market prices instead of game item value", False),
+                     server=P(S, "Game server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     top=P(I, "Top value drivers per chest", 8))),
+    dict(name="meta_builds", fn=advisor.meta_builds,
+         desc="Real usage stats from the official killboard: most successful weapons (kills, deaths, K/D, avg IP) and, for one weapon, "
+              "what armor/offhand/cape/food its players use.",
+         params=dict(weapon=P(S, "Weapon to drill into (optional)"), server=P(S, "Game server", "europe", enum=list(advisor.GAMEINFO)),
+                     pages=P(I, "Pages of 51 events (1-20)", 10), min_ip=P(I, "Ignore players below this average IP", 0),
+                     top=P(I, "Rows", 12))),
+    dict(name="mechanics", fn=advisor.mechanics,
+         desc="Official in-game descriptions and data files for a content type: " + ", ".join(advisor.TOPICS) + ".",
+         params=dict(topic=P(S, "Topic", required=True), limit=P(I, "Max texts", 25))),
+    dict(name="notes", fn=advisor.notes, desc="Search curated, sourced knowledge notes (strategy, verified findings). No query lists all notes.",
+         params=dict(query=P(S, "Search words"), limit=P(I, "Max notes", 5))),
+    dict(name="save_note", fn=advisor.save_note,
+         desc="Save a verified finding as a knowledge note (knowledge/*.md) for future answers. Requires sources.",
+         params=dict(title=P(S, "Title", required=True), body=P(S, "Markdown body", required=True),
+                     sources=P(A, "URLs / game IDs / tool outputs used", required=True), tags=P(A, "Tags"))),
     dict(name="html", fn=core.html_cards, desc="Render item cards with icons to an HTML file.",
          params=dict(items=P(A, "Item IDs/names", required=True), out=P(S, "Output path", "cards.html"))),
 ]

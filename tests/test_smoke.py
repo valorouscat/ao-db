@@ -1,6 +1,8 @@
 """Smoke tests against a built ao.db. Run: python3 -m unittest discover tests  (AO_NET=1 also hits the market API)."""
 import json, os, unittest
-from aodb import core, market, mcp_server
+import tempfile
+from unittest import mock
+from aodb import advisor, core, market, mcp_server
 from aodb.tools import TOOLS, call
 
 
@@ -47,6 +49,28 @@ class Core(unittest.TestCase):
     def test_item_value(self):
         self.assertEqual(core.item_value("T4_METALBAR"), 16)
         self.assertEqual(core.item_value("T4_MAIN_SWORD"), 16 * 16 + 8 * 16)
+
+
+class Advisor(unittest.TestCase):
+    def test_chest_value_offline(self):
+        t = advisor.chest_value("avaroadloot", tier=8)
+        self.assertIn("AVALON_SMALL_SOLO_BASE", t)
+        self.assertIn("value index", t)
+
+    def test_build_cost_with_fake_prices(self):
+        fake = lambda ids, *a, **k: {i: (1000.0, "test") for i in ids}
+        with mock.patch.object(market, "price_map", fake):
+            t = advisor.build_cost(["T8_2H_BOW", "T8_HEAD_LEATHER_SET1", "10x T8_MEAL_STEW"])
+        self.assertIn("Estimated total: 12,000", t)
+        self.assertIn("other enchantments", t)
+
+    def test_mechanics_and_notes(self):
+        self.assertIn("Infamy", advisor.mechanics("corrupted"))
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(advisor, "KNOWLEDGE", d):
+            with self.assertRaises(core.AOError):
+                advisor.save_note("x", "y", [])
+            advisor.save_note("Avalon chest test", "Green chests are cheap", ["test://source"], ["avalon"])
+            self.assertIn("Green chests", advisor.notes("avalon chest"))
 
 
 class MCP(unittest.TestCase):

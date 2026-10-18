@@ -1,5 +1,5 @@
 """Live market data from the Albion Online Data Project (albion-online-data.com, crowd-sourced)."""
-import json, time, urllib.error, urllib.parse, urllib.request
+import hashlib, json, os, time, urllib.error, urllib.parse, urllib.request
 from .core import AOError, label, money, fmt, table, resolve_item, recipes_of, returnable, item_value
 
 API = "https://{srv}.albion-online-data.com/api/v2/stats/{kind}/{ids}.json"
@@ -8,6 +8,7 @@ CITIES = ["Caerleon", "Bridgewatch", "Fort Sterling", "Lymhurst", "Martlock", "T
 SETUP_FEE, TAX_PREMIUM, TAX_NO_PREMIUM = 0.025, 0.04, 0.08
 RETURN_RATES = "royal city: 15.2% (no focus) / 43.5% (focus); city bonus category: 24.8% / 47.9%"
 _cache = {}
+CACHE_DIR = os.environ.get("AO_CACHE", os.path.join(os.path.expanduser("~"), ".cache", "ao-db"))
 
 
 def _get(kind, ids, server, **params):
@@ -18,6 +19,15 @@ def _get(kind, ids, server, **params):
     hit = _cache.get(url)
     if hit and time.time() - hit[0] < 300:
         return hit[1]
+    cpath = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".json")
+    try:  # disk cache shared by CLI runs and the MCP server
+        if time.time() - os.path.getmtime(cpath) < 600:
+            with open(cpath, encoding="utf-8") as fh:
+                data = json.load(fh)
+            _cache[url] = (time.time(), data)
+            return data
+    except (OSError, ValueError):
+        pass
     req = urllib.request.Request(url, headers={"User-Agent": "ao-db (github.com/valorouscat/ao-db)", "Accept-Encoding": "identity"})
     for attempt in range(3):
         try:
@@ -25,13 +35,21 @@ def _get(kind, ids, server, **params):
                 data = json.load(resp)
             break
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:  # API limit: 180 req/min, 300 req/5 min
-                time.sleep(int(e.headers.get("Retry-After") or 0) or 5 * (attempt + 1))
+            if e.code == 429 and attempt < 1:  # API limit: 180 req/min, 300 req/5 min (shared per IP)
+                time.sleep(3)
                 continue
+            if e.code == 429:
+                raise AOError("Market API rate limit (HTTP 429) — try again in a few minutes")
             raise AOError(f"Market API request failed: {e}")
         except Exception as e:  # network failure is a user-facing condition
             raise AOError(f"Market API request failed: {e}")
     _cache[url] = (time.time(), data)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(cpath, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
     return data
 
 
@@ -168,3 +186,40 @@ def best_city(item, server="europe", quality=1):
         o.append(f"\nFlip: buy in {s['city']} at {money(s['sell_price_min'])} → sell to buy order in {b['city']} at {money(b['buy_price_max'])}: "
                  f"**{money(net)}** after 4% tax (transport risk not included).")
     return "\n".join(o)
+
+
+WARNINGS = []  # non-fatal API problems from the last price_map call, shown by callers
+
+
+def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_history=True):
+    """{item_id: (unit_price, source)} — live sell_price_min, falling back to (or capped by) the recent average.
+    API failures (e.g. rate limits) degrade to 'no data' and are reported in WARNINGS instead of raising."""
+    ids = list(dict.fromkeys(ids))
+    WARNINGS.clear()
+    live, hist = {}, {}
+    for i in range(0, len(ids), 80):
+        try:
+            for d in _get("prices", ids[i:i + 80], server, locations=city, qualities=quality):
+                if d["sell_price_min"]:
+                    live[d["item_id"]] = (d["sell_price_min"], d["sell_price_min_date"])
+        except AOError as e:
+            WARNINGS.append(str(e))
+            break
+    for i in range(0, len(ids), 80) if use_history and not WARNINGS else ():
+        try:
+            hist.update({k[0]: v for k, v in history_avg(ids[i:i + 80], server, city, quality, days).items()})
+        except AOError as e:
+            WARNINGS.append(f"history: {e}")
+            break
+    out = {}
+    for i in ids:
+        lv, hv = live.get(i), hist.get(i)
+        if lv and hv and hv[0] and lv[0] > hv[0] * 1.25:
+            out[i] = (hv[0], f"{days}d avg (live {money(lv[0])} inflated)")
+        elif lv:
+            out[i] = (lv[0], f"live {_ago(lv[1])}")
+        elif hv and hv[0]:
+            out[i] = (hv[0], f"{days}d avg")
+        else:
+            out[i] = (None, "no data")
+    return out

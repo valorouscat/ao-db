@@ -44,10 +44,22 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 | `files`, `doc`, `sql`, `schema` | доступ к любым сырым данным и SQL только на чтение |
 | `price`, `history`, `best_city` | живые цены, история, лучший город и флип |
 | `craft_profit` | прибыль крафта: материалы с возвратом, налог станка, налоги рынка, маржа |
+| `build_cost` | стоимость комплекта снаряжения по живым ценам, IP, сравнение .0–.3 |
+| `chest_value` | ожидаемая ценность сундуков через таблицы лута (Авалон, коррапты, хеллгейты, мисты…) |
+| `meta_builds` | статистика официального киллборда: K/D оружия, что носят игроки с этим оружием |
+| `mechanics` | официальные игровые описания контента (требования IP, правила, награды) |
+| `notes`, `save_note` | база проверенных заметок с источниками (`knowledge/`) |
 | `html` | HTML-карточки предметов с иконками |
 | `info` | версия данных и статистика |
 
 Иконки: `https://render.albiononline.com/v1/item/<ID>.png?quality=1..5&size=N`, спеллы: `.../v1/spell/<ID>.png`.
+
+## Ответы на общие вопросы
+На вопросы вроде «подбери снаряжение для проклятых подземелий» или «какие сундуки в Авалоне не стоит фармить» Claude отвечает
+по протоколу из `.claude/skills/albion/SKILL.md`. Он собирает минимум три вида доказательств: игровые правила (`mechanics`),
+игровые числа (`chest_value`, `mob`, `item`), реальное использование (`meta_builds`) и опыт сообщества (`notes` плюс веб-поиск).
+Для любого обсуждаемого снаряжения он **всегда считает стоимость** через `build_cost`. В ответе указываются источники
+и допущения, а проверенные выводы сохраняются в `knowledge/`.
 
 ## Примеры
 ```sh
@@ -57,13 +69,19 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 ./ao list-items --cat weapons --sub bow --tier 8 --sort ip
 ./ao sql "select id, name_ru, json_extract(json,'$.\"@attackdamage\"') dmg from items where sub1='dagger' and tier=8 and enchant=0"
 ./ao doc hellgate --keys-only
+./ao chest-value avaroadloot --tier 8 --live
+./ao build-cost T8_2H_BOW T8_HEAD_LEATHER_SET1 T8_ARMOR_LEATHER_SET1 T8_SHOES_LEATHER_SET1 T8_CAPEITEM_FW_MARTLOCK "10x T8_MEAL_STEW"
+./ao meta-builds --weapon "T8 bow" --pages 20
+./ao mechanics corrupted
 ```
 
 ## Устройство
 ```
 aodb/build.py       индексатор: JSON дампа → SQLite + FTS5 (атомарная замена ao.db)
 aodb/core.py        запросы к базе, каждая функция возвращает markdown
-aodb/market.py      цены AODP (кэш 5 мин, повтор при 429), калькулятор крафта
+aodb/market.py      цены AODP (кэш 10 мин в ~/.cache/ao-db, мягкая обработка 429), калькулятор крафта
+aodb/advisor.py     стоимость сборок, ценность сундуков, мета с киллборда, официальные описания, заметки
+knowledge/          проверенные заметки с источниками
 aodb/tools.py       единый реестр инструментов, из него генерируются CLI и MCP
 aodb/cli.py         CLI `ao`
 aodb/mcp_server.py  MCP-сервер
@@ -74,5 +92,6 @@ scripts/session-start.sh  хук Claude Code: собирает базу в но�
 
 ## Оговорки
 - Числа в описаниях спеллов — базовые значения из `spells.xml`, до масштабирования по item power.
-- `chance` в лут-листах — веса из игровых файлов, а не проценты.
+- `chance` в loot.xml трактуется как процент (999 = гарантированно). Это интерпретация дампа, поэтому сравнение сундуков между собой надёжнее абсолютных чисел.
+- Киллборд показывает только PvP-смерти (в основном открытый мир).
 - Цены рынка собираются игроками и могут устаревать; смотрите колонку age. Завышенные одиночные лоты калькулятор заменяет средней ценой за 7 дней.

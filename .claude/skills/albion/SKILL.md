@@ -1,24 +1,41 @@
 ---
 name: albion
-description: Answer any Albion Online question (items, stats, recipes, crafting costs and profit, spells/abilities, mobs, loot/drops, zones, in-game text, market prices) using the ao-db knowledge base. Use whenever the user asks about Albion Online.
+description: Answer any Albion Online question — factual (items, stats, recipes, spells, mobs, loot, zones, prices) or strategic ("best gear for corrupted dungeons", "which Avalon chests to skip", "is this craft profitable") — with evidence from the ao-db knowledge base, the official killboard, live market data and open web sources, and always with an estimated gear cost. Use whenever the user asks about Albion Online.
 ---
 
-# Albion Online knowledge base (ao-db)
+# Albion Online advisor (ao-db)
 
-Prefer the MCP tools `mcp__albion__*`. If they aren't loaded, use the identical CLI `./ao <tool> ...` from the repo root
-(`./ao <tool> -h`). If the DB is missing: `./setup.sh`.
+Tools: MCP `mcp__albion__*` (preferred) or the identical CLI `./ao <tool>` from the repo root (`./ao <tool> -h`).
+Missing DB → `./setup.sh`. Open web: your own WebSearch / WebFetch (wiki.albiononline.com, forum and reddit block
+scripts behind Cloudflare; search result snippets and other guide sites usually work).
 
-## Workflow
-1. Vague question or unknown term → `search` (any game language).
-2. Entity → `item` / `spell` / `mob` / `zone` / `variants`; relations → `recipe`, `usedin`, `drops`, `loot`.
-3. Economy → `price`, `history`, `best_city`, `craft_profit` (live, crowd-sourced; mention data age).
-4. Anything else → `files` → `doc <file> <key>`; aggregate questions → `sql` (`schema` first; `json_extract(json,'$."@attr"')`).
-5. Answer in the user's language, cite item IDs, show icons as markdown images:
-   `https://render.albiononline.com/v1/item/<ID>.png?size=64`, spells `https://render.albiononline.com/v1/spell/<ID>.png`.
-   Visual comparison → `html` tool, then send the file.
+## A. Factual questions
+`search` → entity tool (`item`, `spell`, `mob`, `zone`, `variants`, `recipe`, `usedin`, `drops`, `loot`) → `doc` / `sql` for details.
+
+## B. General / strategy questions (grounded answer protocol)
+1. **Frame it.** Pin down content type, zone (lethal or not), tier/IP target, solo/group, server, budget. If unstated,
+   pick sensible defaults and say so (e.g. europe server, T8-equivalent 1200+ IP for Slayer corrupted dungeons).
+2. **Collect evidence — at least three independent kinds:**
+   - Game rules: `mechanics <topic>` (official texts: IP requirements, rules, rewards), `doc` on the topic's data file.
+   - Game numbers: `chest_value` (loot value ranking), `mob` (HP/damage of the content's mobs), `spell`, `item` stats.
+   - Real usage: `meta_builds` (killboard: K/D and what players of a weapon wear). It's PvP data, so say so for PvE questions.
+   - Community knowledge: `notes <query>` first, then WebSearch (2+ sources, prefer the current patch and year,
+     check dates; patch notes beat guides). Mark anything older than the latest major update as possibly outdated.
+3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
+   (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
+   comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.
+   Market API rate limited? Say so, give the item list, and use `history` or `price` later.
+4. **Answer format:**
+   - **Recommendation** (concrete item IDs, with icons `![](https://render.albiononline.com/v1/item/<ID>.png?size=48)`)
+   - **Why**: evidence bullets, each with its source (tool + ID, killboard numbers, or a link)
+   - **Cost** table from `build_cost` (+ cheaper/expensive variants)
+   - **Caveats**: model assumptions (loot `chance` interpretation, spell numbers before IP scaling), data age, patch risk
+   - **Sources**: links used
+5. **Learn.** Save a verified, non-obvious finding with `save_note` (title, body, sources). Never save a note without sources.
 
 ## Facts to keep straight
-- Item IDs: `T<tier>_<NAME>[@<enchant>]`; enchanted resources are `T5_ORE_LEVEL2@2`. Tier prefixes in queries work: `8.3 claymore`.
-- Spell numbers are base values before item-power scaling; loot `chance` values are weights.
-- Return-rate presets: royal city 15.2% / 43.5% with focus; bonus-city category 24.8% / 47.9%.
-- Market taxes: 4% premium / 8% without premium, plus 2.5% setup fee.
+- Item IDs `T<tier>_<NAME>[@<enchant>]`; enchanted resources `T5_ORE_LEVEL2@2`; queries accept `8.3 claymore`, `палаш`.
+- Quality adds IP: good +20, outstanding +40, excellent +60, masterpiece +100.
+- Return rate: royal city 15.2% / 43.5% with focus; bonus city 24.8% / 47.9%. Market tax 4% premium / 8% otherwise + 2.5% setup fee.
+- Corrupted dungeons (official text): Hunter = blue/yellow, 800 IP, no item loss; Stalker = red/black, 900 IP, full loot;
+  Slayer = red/black, 1200 IP, Might, full loot.
