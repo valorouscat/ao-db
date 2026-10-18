@@ -194,7 +194,8 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
         o.append(f"_Skipped for missing prices: {', '.join(unp)}_")
     n_est = sum(1 for v in {v for vs in var.values() for v in vs} if is_est(v))
     o.append("_~ = some item prices are estimates: last known price, the same item's other IP levels, or game item value × the "
-             "market ratio of priced items" + (f" ({n_est} item variants estimated this run — the market API was rate limited)" if n_est else "") + "._")
+             "market ratio of priced items" + (f" ({n_est} item variants estimated this run" + (" — the market API was rate limited" if warn else ": no market data")
+                + ")" if n_est else "") + "._")
     o.append(f"\n_IP = base item power of the gear + {spec_ip} assumed from mastery (pass spec_ip). Camp numbers are calibrated on "
              "the real-outcome journal; PvP is the duel model vs open-world killboard builds — skill, positioning and cooldown "
              "timing are not modelled. Spells: picked for PvP per slot (damage, CC, escapes)._")
