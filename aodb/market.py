@@ -384,6 +384,40 @@ def _absurd(item_id, price):
     return bool(v) and price > ABSURD_VALUE_RATIO * v
 
 
+THIN = " ⚠ thin"  # source suffix: one listing / one or two cities and no sales history — treat the price as a guess
+THIN_CITIES = 2
+CRAFT_RETURN = 0.152  # resource return rate of a royal-city craft without focus
+
+
+def is_thin(src):
+    return THIN in (src or "")
+
+
+def _artifact_craft(ids, server, city, quality):
+    """{item: (craft cost, short breakdown)} for items whose recipe uses an artifact: artifact + materials (returnable ones
+    at the no-focus return rate); items without such a recipe or with an unpriced ingredient are left out."""
+    recs = {}
+    for i in ids:
+        r = (recipes_of(i) or [None])[0]
+        if r and any("ARTEFACT" in m for m, _, _ in r["res"]):
+            recs[i] = r
+    if not recs:
+        return {}
+    saved = list(WARNINGS)  # the nested call resets WARNINGS
+    try:
+        mp = price_map(sorted({m for r in recs.values() for m, _, _ in r["res"]}), server, city, quality)
+    finally:
+        WARNINGS[:] = saved + [w for w in WARNINGS if w not in saved]
+    out = {}
+    for i, r in recs.items():
+        lines = [(m, n * (1 if not returnable(mr) else 1 - CRAFT_RETURN), mp.get(m, (None,))[0]) for m, n, mr in r["res"]]
+        if all(p for _, _, p in lines):
+            art = sum(n * p for m, n, p in lines if "ARTEFACT" in m)
+            out[i] = (sum(n * p for _, n, p in lines) + (r["silver"] or 0),
+                      f"artifact {money(art)} + materials {money(sum(n * p for m, n, p in lines if 'ARTEFACT' not in m))}")
+    return out
+
+
 def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_history=True, estimate=False):
     """{item_id: (unit_price, source)} — live sell_price_min, falling back to (or capped by) the recent average.
     API failures (e.g. rate limits) degrade to 'no data' and are reported in WARNINGS instead of raising.
@@ -422,11 +456,11 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
         elif lv and not ref and _absurd(i, lv[0]):  # nothing to compare with and far above any normal market/value ratio
             out[i] = (None, f"live {money(lv[0])} ignored (×{lv[0] / item_value(i):,.0f} item value, no reference price)")
         elif lv:
-            out[i] = (lv[0], f"live {_ago(lv[1])}")
+            out[i] = (lv[0], f"live {_ago(lv[1])}" + (THIN if not hv and len(xs) <= 1 else ""))
         elif hv and hv[0]:
             out[i] = (hv[0], f"{days}d avg")
         elif med:
-            out[i] = (med, f"median of {len(xs)} other cities")
+            out[i] = (med, f"median of {len(xs)} other cities" + (THIN if len(xs) <= THIN_CITIES else ""))
         else:
             out[i] = (None, "no data")
     store, key = _last_load(), f"{server}|{city}|{quality}|"
@@ -436,8 +470,17 @@ def price_map(ids, server="europe", city="Caerleon", quality=1, days=7, use_hist
         store[key + i] = [pr, now, src]
     if fresh:
         _last_save(store)
+    # artifact gear: the artifact is most of the price, so artifact + materials beats item value × an average ratio, both
+    # for unpriced items and to catch a lone listing far above what crafting it costs
+    art = [i for i, (pr, src) in out.items() if (not pr and estimate) or (pr and THIN in src)]
+    for i, (cost, parts) in _artifact_craft(art, server, city, quality).items():
+        pr, src = out[i]
+        if not pr:
+            out[i] = (cost, f"≈ craft cost ({parts})")
+        elif pr > 2 * cost:
+            out[i] = (cost, f"≈ craft cost ({parts}); {src.replace(THIN, '')} {money(pr)} looks inflated")
     if estimate:
-        pairs = [(i, pr, item_value(i)) for i, (pr, _) in fresh.items()]
+        pairs = [(i, pr, item_value(i)) for i, (pr, src) in fresh.items() if THIN not in src]
         pairs += [(k[len(key):], v[0], item_value(k[len(key):])) for k, v in store.items() if k.startswith(key) and k[len(key):] not in fresh][:400]
         for i, (pr, src) in list(out.items()):
             if pr:

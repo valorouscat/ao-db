@@ -242,8 +242,12 @@ def build_cost(items, server="europe", city="Caerleon", quality=1, compare_encha
     o = [f"## Build cost — {city} ({server}), quality {quality} ({core.QUALITY_NAMES.get(quality)})", "",
          table(rows, ["slot", "item", "qty", "IP", "unit price", "source", "total"]),
          f"\n**Estimated total: {money(total)} silver**" + (f" (+ unknown: {', '.join(f'`{m}`' for m in missing)})" if missing else "")
-         + (f" — **≈ {len(est)} of {len(entries)} prices estimated** (market API unavailable: last known price or item value × "
-            "market ratio); re-run later for live prices" if est else "")]
+         + (f" — **≈ {len(est)} of {len(entries)} prices estimated** (last known price, craft cost or item value × market ratio"
+            + ("; market API unavailable — re-run later for live prices" if market.WARNINGS else "; no market data") + ")" if est else "")]
+    thin = [i for i, n, it in entries if market.is_thin(prices.get(i, (None, ""))[1])]
+    if thin:
+        o.append(f"⚠ Thin market for {', '.join(f'`{i}`' for i in thin)}: one or two listings and no sales history — check the "
+                 "in-game market (or another city) before relying on this price.")
     if ip_n:
         o.append(f"Base item power ≈ **{ip_sum / ip_n:.0f}** (gear slots, quality bonus included; mastery/spec not included).")
     if variants:

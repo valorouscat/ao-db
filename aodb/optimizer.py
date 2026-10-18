@@ -103,7 +103,7 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     fams = set(wfams) | {f for _, k in KITS for f, _, _ in k} | {"OFF_TORCH", "CAPE"}
     var = {(f, lv): _variant_at(f, lv) for f in fams for lv in levels}
     prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for i, _ in CONSUMABLES}), server, city, estimate=True)
-    is_est = lambda i: prices.get(i, (None, ""))[1].startswith("≈")
+    is_est = lambda i: prices.get(i, (None, ""))[1].startswith("≈") or market.is_thin(prices.get(i, (None, ""))[1])  # guesses
     warn = list(market.WARNINGS)
     cheap = {}
     for k_, vs in var.items():
@@ -232,8 +232,8 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     if unp:
         o.append(f"_Skipped for missing prices: {', '.join(unp)}_")
     n_est = sum(1 for v in {v for vs in var.values() for v in vs} if is_est(v))
-    o.append("_~ = some item prices are estimates: last known price, the same item's other IP levels, or game item value × the "
-             "market ratio of priced items" + (f" ({n_est} item variants estimated this run" + (" — the market API was rate limited" if warn else ": no market data")
+    o.append("_~ = some item prices are estimates or thin markets (one or two listings, no sales history): last known price, craft "
+             "cost (artifact gear), the same item's other IP levels, or game item value × the market ratio of priced items" + (f" ({n_est} item variants estimated this run" + (" — the market API was rate limited" if warn else ": no market data")
                 + ")" if n_est else "") + "._")
     o.append(f"\n_IP = base item power of the gear + {spec_ip} assumed from mastery (pass spec_ip). Camp numbers are calibrated on "
              "the real-outcome journal; PvP is the duel model vs open-world killboard builds — skill, positioning and cooldown "

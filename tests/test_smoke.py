@@ -429,6 +429,33 @@ class MarketCache(unittest.TestCase):
         self.assertTrue(all(len(u) < 3300 for u in self.urls))
 
 
+class ThinPrices(unittest.TestCase):
+    def test_thin_and_artifact_craft(self):
+        import time as _t
+        now = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime())
+        listings = {"T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL@1": [("Lymhurst", 2_000_000)],          # lone troll listing
+                    "T4_ARTEFACT_2H_DOUBLEBLADEDSTAFF_CRYSTAL": [("Caerleon", 400_000), ("Martlock", 410_000), ("Lymhurst", 420_000)],
+                    "T4_METALBAR_LEVEL1@1": [("Caerleon", 600)], "T4_LEATHER_LEVEL1@1": [("Caerleon", 650)],
+                    "T4_METALBAR": [("Caerleon", 200)], "T4_LEATHER": [("Caerleon", 250)],
+                    "T5_BAG": [("Caerleon", 20_000)]}
+
+        def fake_get(kind, ids, server, **params):
+            if kind == "history":
+                return []
+            return [{"item_id": i, "city": c, "sell_price_min": p, "sell_price_min_date": now}
+                    for i in ids for c, p in listings.get(i, [])]
+        with mock.patch.object(market, "_get", fake_get), mock.patch.object(market, "_last_load", dict), \
+                mock.patch.object(market, "_last_save", lambda s: None):
+            pm = market.price_map(["T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL@1", "T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL", "T5_BAG"], estimate=True)
+        twin1, twin0, bag = (pm[i] for i in ("T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL@1", "T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL", "T5_BAG"))
+        self.assertTrue(twin1[1].startswith("≈ craft cost") and "looks inflated" in twin1[1])   # 2M listing vs ~430k craft
+        self.assertLess(twin1[0], 500_000)
+        self.assertTrue(twin0[1].startswith("≈ craft cost"))                                      # no listing: artifact + materials
+        self.assertGreater(twin0[0], 400_000)                                                     # not item value × average ratio
+        self.assertTrue(market.is_thin(bag[1]))                                                   # one city, no history
+        self.assertEqual(bag[0], 20_000)
+
+
 class KillboardStore(unittest.TestCase):
     def test_accumulates_without_duplicates(self):
         d = tempfile.mkdtemp()
