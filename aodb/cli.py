@@ -20,6 +20,8 @@ def build_parser():
                 # a single required text arg swallows the rest of the line: `ao item 6.1 broadsword`
                 nargs = "+" if v["type"] == "array" or len(req) == 1 else None
                 p.add_argument(k, nargs=nargs, help=h)
+            elif k in ("query", "text") and not req:  # optional free text: `ao notes avalon chests`
+                p.add_argument(k, nargs="*", help=h)
             elif v["type"] == "boolean":
                 p.add_argument("--" + k.replace("_", "-"), dest=k, action=argparse.BooleanOptionalAction, default=v["default"], help=h)
             elif v["type"] == "array":
@@ -39,7 +41,7 @@ def main(argv=None):
     for k, v in t["params"].items():
         val = getattr(a, k, None)
         if isinstance(val, list) and v["type"] != "array":
-            val = " ".join(val)
+            val = " ".join(val) or None
         elif isinstance(val, str) and v["type"] == "array":
             val = [x.strip() for x in val.split(",") if x.strip()]
         args[k] = val

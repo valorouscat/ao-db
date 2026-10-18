@@ -48,7 +48,8 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 | `chest_value` | ожидаемая ценность сундуков через таблицы лута (Авалон, коррапты, хеллгейты, мисты…) |
 | `meta_builds` | статистика официального киллборда: K/D оружия, что носят игроки с этим оружием |
 | `mechanics` | официальные игровые описания контента (требования IP, правила, награды) |
-| `notes`, `save_note` | база проверенных заметок с источниками (`knowledge/`) |
+| `notes`, `save_note` | база проверенных заметок с источниками (`knowledge/`), пометка устаревших |
+| `patchnotes`, `latest_patches`, `update_patchnotes` | официальные патчноуты и дев-апдейты (Steam, с 2018 года), поиск, сначала новые |
 | `html` | HTML-карточки предметов с иконками |
 | `info` | версия данных и статистика |
 
@@ -60,6 +61,16 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 игровые числа (`chest_value`, `mob`, `item`), реальное использование (`meta_builds`) и опыт сообщества (`notes` плюс веб-поиск).
 Для любого обсуждаемого снаряжения он **всегда считает стоимость** через `build_cost`. В ответе указываются источники
 и допущения, а проверенные выводы сохраняются в `knowledge/`.
+
+## Актуальность
+- **Патчноуты.** 270+ официальных постов (changelog, hotfix, dev talk) из ленты Steam хранятся в `knowledge/patchnotes/`
+  и индексируются в `knowledge.db`. Источник — Steam News API: официальный сайт и форум закрыты для скриптов.
+- **В карточках.** Карточки `item` и `spell` показывают «Recent patch changes» — последние изменения из патчноутов.
+- **`info`.** Показывает дату дампа, текущий патч и последнее крупное обновление и предупреждает, если дамп старше патча.
+- **Заметки.** Заметки, написанные до последнего крупного обновления, помечаются ⚠.
+- **Хук при старте сессии.** Подтягивает новый дамп, если он вышел, и новые патчноуты.
+- **Правило для ответов.** Перед ответом проверять `patchnotes` по теме: действует самый новый патч. В ответе указывается,
+  для какого патча он верен.
 
 ## Примеры
 ```sh
@@ -73,6 +84,8 @@ claude mcp add albion -- sh -c 'cd /path/to/ao-db && exec python3 -m aodb.mcp_se
 ./ao build-cost T8_2H_BOW T8_HEAD_LEATHER_SET1 T8_ARMOR_LEATHER_SET1 T8_SHOES_LEATHER_SET1 T8_CAPEITEM_FW_MARTLOCK "10x T8_MEAL_STEW"
 ./ao meta-builds --weapon "T8 bow" --pages 20
 ./ao mechanics corrupted
+./ao patchnotes "roads of avalon chests"
+./ao patchnotes broadsword --since 2026-01-01
 ```
 
 ## Устройство
@@ -81,7 +94,8 @@ aodb/build.py       индексатор: JSON дампа → SQLite + FTS5 (а�
 aodb/core.py        запросы к базе, каждая функция возвращает markdown
 aodb/market.py      цены AODP (кэш 10 мин в ~/.cache/ao-db, мягкая обработка 429), калькулятор крафта
 aodb/advisor.py     стоимость сборок, ценность сундуков, мета с киллборда, официальные описания, заметки
-knowledge/          проверенные заметки с источниками
+aodb/patchnotes.py  патчноуты из Steam: загрузка, конвертация BBCode→markdown, индекс, поиск
+knowledge/          проверенные заметки с источниками; knowledge/patchnotes/ — официальные патчноуты
 aodb/tools.py       единый реестр инструментов, из него генерируются CLI и MCP
 aodb/cli.py         CLI `ao`
 aodb/mcp_server.py  MCP-сервер

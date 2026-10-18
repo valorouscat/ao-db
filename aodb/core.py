@@ -287,11 +287,19 @@ def item(query, raw=False, all_langs=False):
     if mobs:
         o.append("\n### Mobs (top by weight)\n" + table([(m["mob_id"], pick(m), m["tier"], m["lootlist"], m["chance"]) for m in mobs],
                                                        ["mob", "name", "T", "loot list", "weight"]))
+    rc = _recent(re.sub(r"^\S+'s ", "", it["name_en"] or ""))
+    if rc:
+        o.append("\n### Recent patch changes (stats above are from the data dump; newer patches win)\n" + rc)
     if len(ids) > 1:
         o.append("\n_Other matches:_ " + ", ".join(f"`{x}`" for x in ids[1:15]))
     if raw:
         o.append("\n### Raw\n```json\n" + json.dumps(data, ensure_ascii=False, indent=1) + "\n```")
     return "\n".join(o)
+
+
+def _recent(term):
+    from . import patchnotes  # optional layer: works without stored patch notes
+    return patchnotes.recent_changes(term)
 
 
 def variants(query):
@@ -524,6 +532,9 @@ def spell(query, raw=False, verbose=False):
         o.append("\n_Numbers are raw base values from spells.xml (damage before item-power scaling)._")
     if refs and verbose:
         o.append(table([(i, t, v) for i, (t, v) in enumerate(refs)], ["#", "tag", "value"]))
+    rc = _recent(s["name_en"])
+    if rc:
+        o.append("\n### Recent patch changes\n" + rc)
     items = q("SELECT DISTINCT s.item_id FROM item_spells s WHERE s.spell_id=? LIMIT 40", sid)
     if items:
         o.append("\n### Available on items\n" + ", ".join(label(r["item_id"]) for r in items))
@@ -583,7 +594,20 @@ def schema():
 
 
 def info():
+    """Data versions and freshness: game data dump vs latest official patch notes."""
+    from . import patchnotes
     o = [f"- {r['k']}: {r['v']}" for r in q("SELECT * FROM meta")]
+    try:
+        pdate, ptitle = patchnotes.current_patch()
+        mdate, mtitle = patchnotes.last_major()
+        o.append(f"- current patch (Steam news): {ptitle} ({pdate})")
+        o.append(f"- last major update: {mtitle} ({mdate})")
+        dump = re.search(r"\d{4}-\d{2}-\d{2}", q1("SELECT v FROM meta WHERE k='repo_rev'")["v"] or "")
+        if dump and pdate and dump.group(0) < pdate:
+            o.append(f"- ⚠ game data dump ({dump.group(0)}) is older than {ptitle}: check patch notes for changed numbers; "
+                     "run ./setup.sh to pull newer dumps")
+    except AOError as e:
+        o.append(f"- patch notes: {e}")
     o += [f"- {t}: {q1(f'SELECT COUNT(*) FROM {t}')[0]}" for t in ["items", "recipes", "spells", "mobs", "loot", "clusters", "loc", "docs"]]
     return "\n".join(o)
 

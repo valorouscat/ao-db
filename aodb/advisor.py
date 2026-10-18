@@ -381,7 +381,25 @@ def notes(query=None, limit=5):
     if not hits:
         hits = db.execute("SELECT name, body FROM n WHERE n MATCH ? ORDER BY bm25(n) LIMIT ?",
                           (" OR ".join(core.fts_query(query).split()), limit)).fetchall()
-    return "\n\n---\n\n".join(f"<!-- {n} -->\n{b}" for n, b in hits) or f"No notes match {query!r}"
+    return "\n\n---\n\n".join(f"<!-- {n} -->\n{_staleness(b)}{b}" for n, b in hits) or f"No notes match {query!r}"
+
+
+def _staleness(body):
+    """Warn when a note predates the latest major update / patch."""
+    from . import patchnotes
+    m = re.search(r"_updated: (\d{4}-\d{2}-\d{2})", body)
+    if not m:
+        return "⚠ undated note — verify against patchnotes.\n\n"
+    try:
+        mdate, mtitle = patchnotes.last_major()
+        pdate, ptitle = patchnotes.current_patch()
+    except AOError:
+        return ""
+    if mdate and m.group(1) < mdate:
+        return f"⚠ written before the last major update ({mtitle}, {mdate}) — re-verify with patchnotes before relying on it.\n\n"
+    if pdate and m.group(1) < pdate:
+        return f"ℹ newer patch since this note: {ptitle} ({pdate}) — check patchnotes(<topic>, since={m.group(1)}).\n\n"
+    return ""
 
 
 def save_note(title, body, sources, tags=None):
@@ -391,7 +409,9 @@ def save_note(title, body, sources, tags=None):
     slug = re.sub(r"[^\w]+", "-", title.lower(), flags=re.U).strip("-")[:60] or "note"
     path = os.path.join(KNOWLEDGE, f"{slug}.md")
     today = datetime.date.today().isoformat()
-    text = (f"# {title}\n\n_updated: {today}" + (f" · tags: {', '.join(tags)}" if tags else "") + f" · data: {core.q1('SELECT v FROM meta WHERE k=?', 'repo_rev')['v'][:7]}_\n\n"
+    from . import patchnotes
+    text = (f"# {title}\n\n_updated: {today}" + (f" · tags: {', '.join(tags)}" if tags else "") +
+            f" · data: {core.q1('SELECT v FROM meta WHERE k=?', 'repo_rev')['v'][:7]} · patch: {patchnotes.latest_title()}_\n\n"
             f"{body.strip()}\n\n## Sources\n" + "\n".join(f"- {s}" for s in sources) + "\n")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)

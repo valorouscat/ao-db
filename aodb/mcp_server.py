@@ -13,7 +13,7 @@ MAX_CHARS = int(os.environ.get("AO_MCP_MAX_CHARS", "60000"))
 INSTRUCTIONS = (
     "Albion Online game knowledge base built from ao-data/ao-bin-dumps (items, recipes, spells, mobs, loot, zones, all game text, "
     "every raw data file) plus live market prices. Workflow: `search` for anything vague → entity tools (`item`, `spell`, `mob`, `recipe`, "
-    "`drops`, `zone`) → `doc` / `sql` for raw details. Item arguments accept IDs, names in any language and tier prefixes like '8.3 claymore'. "
+    "`drops`, `zone`) → `doc` / `sql` for raw details. Check `patchnotes` so answers reflect the current patch (`info` shows data freshness). Item arguments accept IDs, names in any language and tier prefixes like '8.3 claymore'. "
     "Outputs are markdown; item icons: https://render.albiononline.com/v1/item/<ID>.png, spells: .../v1/spell/<ID>.png.")
 
 
@@ -33,9 +33,9 @@ def schema_for(t):
     return {"type": "object", "properties": props, "required": req, "additionalProperties": False}
 
 
-OPEN_WORLD = {"price", "history", "best_city", "craft_profit", "build_cost", "meta_builds"}
+OPEN_WORLD = {"price", "history", "best_city", "craft_profit", "build_cost", "meta_builds", "update_patchnotes"}
 TOOL_LIST = [{"name": t["name"], "description": t["desc"], "inputSchema": schema_for(t),
-              "annotations": {"readOnlyHint": t["name"] not in ("html", "save_note"),
+              "annotations": {"readOnlyHint": t["name"] not in ("html", "save_note", "update_patchnotes"),
                               "openWorldHint": t["name"] in OPEN_WORLD}}
              for t in TOOLS]
 

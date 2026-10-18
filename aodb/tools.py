@@ -1,5 +1,5 @@
 """Single registry of operations. The CLI and the MCP server are both generated from it."""
-from . import advisor, core, market
+from . import advisor, core, market, patchnotes
 
 S, I, N, B, A = "string", "integer", "number", "boolean", "array"
 Q_ITEM = "Item ID (T4_MAIN_SWORD@2) or name in any language, optional tier prefix ('6.1 broadsword', 'T8 палаш')"
@@ -60,7 +60,7 @@ TOOLS = [
                                        "json_extract(json,'$.\"@attackdamage\"').",
          params=dict(query=P(S, "SELECT / WITH statement", required=True), limit=P(I, "max rows", 200))),
     dict(name="schema", fn=core.schema, desc="Database tables and columns.", params={}),
-    dict(name="info", fn=core.info, desc="Database build info and row counts (data version).", params={}),
+    dict(name="info", fn=core.info, desc="Data versions and freshness: dump date, current patch, last major update, row counts.", params={}),
     dict(name="price", fn=market.price, desc="Live market prices per city (Albion Online Data Project).",
          params=dict(items=P(A, "Item IDs/names", required=True), server=P(S, "Game server", "europe", enum=list(market.SERVERS)),
                      cities=P(S, "Comma list, e.g. 'Caerleon,Martlock'"), quality=P(I, "1-5", 1))),
@@ -104,6 +104,15 @@ TOOLS = [
          desc="Save a verified finding as a knowledge note (knowledge/*.md) for future answers. Requires sources.",
          params=dict(title=P(S, "Title", required=True), body=P(S, "Markdown body", required=True),
                      sources=P(A, "URLs / game IDs / tool outputs used", required=True), tags=P(A, "Tags"))),
+    dict(name="patchnotes", fn=patchnotes.patchnotes,
+         desc="Search official patch notes / dev updates (Steam news, 2018→now). Results relevant to the query, newest first. "
+              "Use to check that any mechanic, number, build or guide is still current.",
+         params=dict(query=P(S, "What changed (item, ability, content, mechanic)", required=True),
+                     since=P(S, "Only notes on/after YYYY-MM-DD"), limit=P(I, "Max sections", 6), max_chars=P(I, "Truncate each section", 1500))),
+    dict(name="latest_patches", fn=patchnotes.latest_patches, desc="Current patch, last major update and the latest official posts.",
+         params=dict(limit=P(I, "Rows", 12))),
+    dict(name="update_patchnotes", fn=patchnotes.update, desc="Fetch new official posts from Steam into knowledge/patchnotes and reindex.",
+         params=dict(full=P(B, "Re-scan the whole history", False))),
     dict(name="html", fn=core.html_cards, desc="Render item cards with icons to an HTML file.",
          params=dict(items=P(A, "Item IDs/names", required=True), out=P(S, "Output path", "cards.html"))),
 ]

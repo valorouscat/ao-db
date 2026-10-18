@@ -2,3 +2,5 @@ ao.db
 ao-bin-dumps/
 __pycache__/
 ao.db.tmp
+knowledge.db
+knowledge.db.tmp

@@ -9,6 +9,16 @@ Tools: MCP `mcp__albion__*` (preferred) or the identical CLI `./ao <tool>` from 
 Missing DB → `./setup.sh`. Open web: your own WebSearch / WebFetch (wiki.albiononline.com, forum and reddit block
 scripts behind Cloudflare; search result snippets and other guide sites usually work).
 
+## 0. Freshness rules (always)
+- Know "now": `latest_patches` (or `info`) → current patch and last major update. Game data stats come from the dump
+  (`info` shows its date); balance changes after that date exist only in patch notes.
+- Before stating any number, mechanic or recommendation, check `patchnotes <topic>` — results are newest first; the newest
+  note is in force. Item and spell cards include "Recent patch changes": read them, mention relevant ones.
+- Web sources: put the current year or patch name in queries; treat anything published before the last major update as
+  outdated unless a patch note confirms it is unchanged. Say the date of each source.
+- `notes` flags notes written before the last major update (⚠): re-verify with `patchnotes` and refresh via `save_note`.
+- Session start updates dumps and patch notes automatically; mid-session use `update_patchnotes` if a new patch dropped.
+
 ## A. Factual questions
 `search` → entity tool (`item`, `spell`, `mob`, `zone`, `variants`, `recipe`, `usedin`, `drops`, `loot`) → `doc` / `sql` for details.
 
@@ -19,6 +29,7 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
    - Game rules: `mechanics <topic>` (official texts: IP requirements, rules, rewards), `doc` on the topic's data file.
    - Game numbers: `chest_value` (loot value ranking), `mob` (HP/damage of the content's mobs), `spell`, `item` stats.
    - Real usage: `meta_builds` (killboard: K/D and what players of a weapon wear). It's PvP data, so say so for PvE questions.
+   - Official changes: `patchnotes <topic>` (and `since=<date of a source>` to see what changed after it).
    - Community knowledge: `notes <query>` first, then WebSearch (2+ sources, prefer the current patch and year,
      check dates; patch notes beat guides). Mark anything older than the latest major update as possibly outdated.
 3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
@@ -29,6 +40,7 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
    - **Recommendation** (concrete item IDs, with icons `![](https://render.albiononline.com/v1/item/<ID>.png?size=48)`)
    - **Why**: evidence bullets, each with its source (tool + ID, killboard numbers, or a link)
    - **Cost** table from `build_cost` (+ cheaper/expensive variants)
+   - **As of**: current patch name/date the answer is valid for
    - **Caveats**: model assumptions (loot `chance` interpretation, spell numbers before IP scaling), data age, patch risk
    - **Sources**: links used
 5. **Learn.** Save a verified, non-obvious finding with `save_note` (title, body, sources). Never save a note without sources.

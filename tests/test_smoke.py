@@ -2,7 +2,7 @@
 import json, os, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, market, mcp_server
+from aodb import advisor, core, market, mcp_server, patchnotes
 from aodb.tools import TOOLS, call
 
 
@@ -71,6 +71,31 @@ class Advisor(unittest.TestCase):
                 advisor.save_note("x", "y", [])
             advisor.save_note("Avalon chest test", "Green chests are cheap", ["test://source"], ["avalon"])
             self.assertIn("Green chests", advisor.notes("avalon chest"))
+
+
+class PatchNotes(unittest.TestCase):
+    def test_search_and_freshness(self):
+        t = patchnotes.patchnotes("roads of avalon")
+        self.assertIn("Roads", t)
+        self.assertIn("[source]", t)
+        self.assertTrue(patchnotes.current_patch()[0])
+        self.assertTrue(patchnotes.last_major()[1])
+        self.assertIn("current patch", core.info())
+
+    def test_cards_show_recent_changes(self):
+        self.assertIn("Recent patch changes", core.item("T8_MAIN_SWORD"))
+
+    def test_bbcode(self):
+        md = patchnotes.bbcode_to_md("[h3]Title[/h3][b]Bold[/b][list][*]A[list][*]B[/*][/list][/*][/list][url=https://x.y]link[/url]")
+        self.assertIn("### Title", md)
+        self.assertIn("**Bold**", md)
+        self.assertIn("- A", md)
+        self.assertIn("  - B", md)
+        self.assertIn("[link](https://x.y)", md)
+
+    def test_note_staleness(self):
+        self.assertIn("⚠", advisor._staleness("_updated: 2019-01-01_"))
+        self.assertEqual(advisor._staleness("_updated: 2999-01-01_"), "")
 
 
 class MCP(unittest.TestCase):

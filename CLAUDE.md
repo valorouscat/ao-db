@@ -2,8 +2,10 @@
 - Albion questions: follow the `albion` skill (factual lookup, or the grounded-answer protocol for strategy questions).
   Tools: MCP `mcp__albion__*` (server in `.mcp.json`) or `./ao` CLI.
 - **Whenever gear is recommended or discussed, run `build_cost` and show the estimated cost.**
+- **Answers must be current:** check `patchnotes` for the topic (newest note wins), state the patch the answer is valid for.
 - Fresh checkout: `./setup.sh` (the SessionStart hook does it automatically when `ao.db` is missing).
 - Code: `aodb/` — add a feature as a function returning markdown (`core.py` data, `market.py` prices, `advisor.py` analysis),
   then register it in `tools.py`; CLI and MCP are generated from that registry. After `build.py` changes: `python3 -m aodb.build`.
-- `knowledge/*.md`: curated, sourced notes (written via `save_note`); commit them.
+- `knowledge/*.md`: curated, sourced notes (written via `save_note`); `knowledge/patchnotes/`: official posts from Steam
+  (`python3 -m aodb.patchnotes --update`); commit both. `knowledge.db` is a generated index (gitignored).
 - Tests: `python3 -m unittest discover tests` (needs ao.db; `AO_NET=1` for market).
