@@ -1,2 +1,3 @@
 #!/bin/sh
-exec python3 "$(dirname "$(readlink -f "$0")")/ao.py" "$@"
+D="$(dirname "$(readlink -f "$0")")"
+PYTHONPATH="$D${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m aodb.cli "$@"

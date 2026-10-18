@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "albion": {
+      "command": "sh",
+      "args": ["-c", "cd \"${CLAUDE_PROJECT_DIR:-.}\" && exec python3 -m aodb.mcp_server"]
+    }
+  }
+}

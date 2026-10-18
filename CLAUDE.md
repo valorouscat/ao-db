@@ -1,4 +1,6 @@
 # ao-db — Albion Online knowledge base
-For any Albion Online question use the `albion` skill / the `./ao` CLI (see README.md).
-First run in a fresh checkout: `./setup.sh` (clones ao-data/ao-bin-dumps into ./ao-bin-dumps and builds ao.db, ~15 s).
-Update data: `./setup.sh` again.
+- Albion questions: use the `albion` skill → MCP tools `mcp__albion__*` (server in `.mcp.json`) or `./ao` CLI.
+- Fresh checkout: `./setup.sh` (the SessionStart hook does it automatically when `ao.db` is missing).
+- Code: `aodb/` — add a feature as a function in `core.py`/`market.py` returning markdown, then register it in `tools.py`
+  (CLI and MCP are generated from that registry). Rebuild DB after `build.py` changes: `python3 -m aodb.build`.
+- Tests: `python3 -m unittest discover tests` (needs ao.db; `AO_NET=1` for market).

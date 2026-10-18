@@ -1,0 +1,83 @@
+"""Smoke tests against a built ao.db. Run: python3 -m unittest discover tests  (AO_NET=1 also hits the market API)."""
+import json, os, unittest
+from aodb import core, market, mcp_server
+from aodb.tools import TOOLS, call
+
+
+class Core(unittest.TestCase):
+    def test_resolve(self):
+        self.assertEqual(core.resolve_item("T4_MAIN_SWORD@2"), "T4_MAIN_SWORD@2")
+        self.assertEqual(core.resolve_item("6.1 палаш"), "T6_MAIN_SWORD@1")
+        self.assertEqual(core.resolve_item("Adept's Bag"), "T4_BAG")
+        self.assertTrue(core.resolve_item("T6 bar").endswith("METALBAR"))
+        with self.assertRaises(core.AOError):
+            core.resolve_item("zzzqqqxx")
+
+    def test_item_card(self):
+        t = core.item("T4_MAIN_SWORD")
+        for s in ("Broadsword", "### Recipe 1", "T4_METALBAR", "HEROICSTRIKE2", "### Stats"):
+            self.assertIn(s, t)
+
+    def test_spells_follow_reference(self):
+        self.assertIn("HEROICSTRIKE2", core.item("T8_MAIN_SWORD"))
+
+    def test_recipe_tree(self):
+        t = core.recipe("T8_2H_CLAYMORE_AVALON@3", qty=2, return_rate=15.2)
+        self.assertIn("Total base materials", t)
+        self.assertIn("T8_ARTEFACT_2H_CLAYMORE_AVALON", t)
+
+    def test_variants(self):
+        self.assertIn("T8_MAIN_SWORD@4", core.variants("T4_MAIN_SWORD"))
+
+    def test_spell_placeholders(self):
+        t = core.spell("HEROICSTRIKE2")
+        self.assertNotIn("{0}", t)
+        self.assertIn("Heroic", t)
+
+    def test_misc(self):
+        self.assertIn("Martlock", core.zone("Martlock"))
+        self.assertIn("Adept", core.loc(key="@ITEMS_T4_BAG"))
+        self.assertIn("FAME_BOOKS", core.drops("T4_SKILLBOOK_STANDARD"))
+        self.assertIn("Items", core.search("broadsword"))
+        self.assertIn("hellgate", core.doc("hellgate", keys_only=True))
+        self.assertIn("KEEPER", core.mob("T8_MOB_KEEPER_UNPROVEN_MALE"))
+        with self.assertRaises(core.AOError):
+            core.sql("DELETE FROM items")
+
+    def test_item_value(self):
+        self.assertEqual(core.item_value("T4_METALBAR"), 16)
+        self.assertEqual(core.item_value("T4_MAIN_SWORD"), 16 * 16 + 8 * 16)
+
+
+class MCP(unittest.TestCase):
+    def rpc(self, method, params=None, id_=1):
+        return mcp_server.handle({"jsonrpc": "2.0", "id": id_, "method": method, "params": params or {}})
+
+    def test_protocol(self):
+        self.assertEqual(self.rpc("initialize", {"protocolVersion": "2025-06-18"})["result"]["serverInfo"]["name"], "albion")
+        self.assertIsNone(mcp_server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}))
+        names = {t["name"] for t in self.rpc("tools/list")["result"]["tools"]}
+        self.assertEqual(names, {t["name"] for t in TOOLS})
+        self.assertIn("error", self.rpc("nope"))
+
+    def test_call(self):
+        r = self.rpc("tools/call", {"name": "item", "arguments": {"query": "T4_BAG"}})["result"]
+        self.assertFalse(r["isError"])
+        self.assertIn("Adept's Bag", r["content"][0]["text"])
+        r = self.rpc("tools/call", {"name": "item", "arguments": {"query": "zzzqqqxx"}})["result"]
+        self.assertTrue(r["isError"])
+
+    def test_every_tool_schema_is_json(self):
+        for t in mcp_server.TOOL_LIST:
+            json.dumps(t["inputSchema"])
+
+
+@unittest.skipUnless(os.environ.get("AO_NET"), "set AO_NET=1 to test the live market API")
+class Market(unittest.TestCase):
+    def test_price_and_profit(self):
+        self.assertIn("T4_BAG", market.price(["T4_BAG"], cities="Caerleon"))
+        self.assertIn("total cost", call("craft_profit", {"item": "T4_BAG", "city": "Martlock"}))
+
+
+if __name__ == "__main__":
+    unittest.main()

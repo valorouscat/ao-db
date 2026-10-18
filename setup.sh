@@ -7,4 +7,4 @@ if [ -d ao-bin-dumps/.git ]; then
 else
   git clone --depth 1 https://github.com/ao-data/ao-bin-dumps ao-bin-dumps
 fi
-python3 build.py --repo ao-bin-dumps
+python3 -m aodb.build --repo ao-bin-dumps

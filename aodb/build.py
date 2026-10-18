@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Build the Albion Online knowledge base (SQLite + FTS5) from ao-bin-dumps.
 
-Usage: python3 build.py [--repo PATH] [--db PATH] [--regions]
+Usage: python3 -m aodb.build [--repo PATH] [--db PATH] [--regions]
 """
 import argparse, json, os, re, sqlite3, sys, time, glob
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
 LANGS = ["EN-US", "RU-RU", "DE-DE", "FR-FR", "PL-PL", "ES-ES", "PT-BR", "IT-IT",
          "ZH-CN", "KO-KR", "JA-JP", "ZH-TW", "ID-ID", "TR-TR", "AR-SA"]
 
@@ -75,10 +75,13 @@ def load(repo, name):
 
 class Builder:
     def __init__(self, repo, db, regions):
+        if not os.path.exists(os.path.join(repo, "items.json")):
+            sys.exit(f"ao-bin-dumps not found at {repo}. Run ./setup.sh or pass --repo")
         self.repo, self.dbpath, self.regions = repo, db, regions
-        if os.path.exists(db):
-            os.remove(db)
-        self.db = sqlite3.connect(db)
+        self.tmppath = db + ".tmp"  # build aside, then atomically swap in
+        if os.path.exists(self.tmppath):
+            os.remove(self.tmppath)
+        self.db = sqlite3.connect(self.tmppath)
         self.db.executescript("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;" + SCHEMA)
         self.loc = {}
 
@@ -125,8 +128,8 @@ class Builder:
         names = {f["UniqueName"]: f for f in formatted}
         ids = list(names.keys())
         # include raw items missing from formatted
-        for k in byid:
-            if k not in names:
+        for k in byid:  # raw-only items (skins, test items); *_LEVELn bases only exist as @n variants
+            if k not in names and not re.search(r"_LEVEL\d$", k):
                 ids.append(k)
 
         irows, frows, rrows, urows, srows = [], [], [], [], []
@@ -170,7 +173,8 @@ class Builder:
                           data.get("@craftingcategory"), json.dumps(data, ensure_ascii=False)))
             tags = " ".join(filter(None, [kind, data.get("@shopcategory"), data.get("@shopsubcategory1"),
                                           data.get("@shopsubcategory2"), data.get("@slottype"), f"T{tier}" if tier else None,
-                                          f"T{tier}.{ench}" if tier else None]))
+                                          f"T{tier}.{ench}" if tier else None]
+                            + [v for k, v in ln.items() if k not in ("EN-US", "RU-RU")]))
             frows.append((iid, ln.get("EN-US"), ln.get("RU-RU"), ld.get("EN-US"), ld.get("RU-RU"), tags))
             for n, cr in enumerate(aslist(data.get("craftingrequirements"))):
                 if not isinstance(cr, dict):
@@ -388,6 +392,7 @@ class Builder:
         self.db.commit()
         self.db.execute("VACUUM")
         self.db.close()
+        os.replace(self.tmppath, self.dbpath)
         self.log(f"done in {time.time()-t:.0f}s ->", self.dbpath, f"{os.path.getsize(self.dbpath)/1e6:.0f} MB")
 
 
