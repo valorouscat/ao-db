@@ -211,6 +211,12 @@ TOOLS = [
                      ips=P(S, "Your in-game IP incl. mastery: 'avg=1020'"),
                      slots=P(S, "Slots to tune, comma separated: " + ", ".join(pvp.TUNE_SLOTS)),
                      passes=P(I, "Search passes (1-5)", 3), top=P(I, "Alternatives shown per slot", 5))),
+    dict(name="pvp_backtest", fn=pvp.pvp_backtest,
+         desc="Backtest the PvP duel model on real killboard solo kills (both players' gear, spells, IP): held-out accuracy, "
+              "log-loss and calibration for IP-only, the raw model and the calibrated feature model; fit=true refits and saves "
+              "the calibration that duel / pvp_check / pvp_tune use.",
+         params=dict(servers=P(S, "Servers, comma separated", "europe,west,east"), pages=P(I, "Killboard pages of 51 per server (≤20)", 20),
+                     fit=P(B, "Refit and save the calibration", False), test_share=P(N, "Held-out share", 0.3))),
     dict(name="farm_plan", fn=pvp.farm_plan,
          desc="Where to farm with a build: per PvP/PvPvE content — entry check, effective IP, win/death chance vs that fight size's "
               "killboard meta, reward multipliers, expected re-gear loss per hour and the silver/hour needed to break even "

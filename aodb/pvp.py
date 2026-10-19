@@ -4,7 +4,7 @@ split by fight size, build search and a farm plan (reward multipliers vs death r
 
 Everything combat-related is a model on top of spells.json / items.json: compare options, don't read it as a guarantee.
 """
-import functools, json, math, re, statistics
+import functools, json, math, os, re, statistics, time
 from collections import Counter, defaultdict
 from . import core, combat, gearcheck, market, advisor
 from .core import AOError, q1, label, money, table
@@ -574,10 +574,64 @@ def _ttk(a, b):
     return OPENING + max(ehp - burst, 0) / net
 
 
+CAL_PATH = os.path.join(core.ROOT, "knowledge", "pvp_calibration.json")
+KIT_FEATURES = ("logttk", "burst", "cc", "escape", "ranged", "hp")
+FAMILY_SLOTS = ("mainhand", "offhand", "head", "armor", "shoes", "cape")
+
+
+@functools.lru_cache(maxsize=1)
+def calibration_model():
+    """Logistic weights fitted on killboard fights by pvp_backtest(fit=True), or None."""
+    try:
+        with open(CAL_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _families(p):
+    by = {e["row"]["slot"]: advisor._family(e["id"]) for e in p["entries"] if not e["inventory"]}
+    return {s_: by.get(s_) or "none" for s_ in FAMILY_SLOTS}
+
+
+def pair_features(a, b, t_ab=None, t_ba=None):
+    """Antisymmetric features of a vs b (f(b, a) = −f(a, b)): effective IP gap (100 IP = 1), the duel simulation's kit
+    signals (TTK ratio, burst share of HP, CC, escapes, ranged, HP; clipped to ±2) and the item family in every slot
+    (slot:family = +1 for a, −1 for b) — the item effects are learned from killboard outcomes."""
+    t_ab = t_ab if t_ab is not None else _ttk(a, b)
+    t_ba = t_ba if t_ba is not None else _ttk(b, a)
+    ka, kb = a["kit"], b["kit"]
+    ba, bb = _hit(a, b)[0], _hit(b, a)[0]
+    esc = lambda k: k["dash30"] + k["invis30"] / 3 + k["invuln30"]
+    clip = lambda x: max(min(x, 2.0), -2.0)
+    f = {"dip": (a["eff_avg"] - b["eff_avg"]) / 100, "logttk": clip(math.log(max(t_ba, 0.1) / max(t_ab, 0.1))),
+         "burst": clip(min(ba / b["stats"]["hp"], 2) - min(bb / a["stats"]["hp"], 2)),
+         "cc": clip((ka["cc30"] + ka["root30"] - kb["cc30"] - kb["root30"]) / 10), "escape": clip((esc(ka) - esc(kb)) / 10),
+         "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)}
+    fa, fb = _families(a), _families(b)
+    for s_ in FAMILY_SLOTS:
+        if fa[s_] != fb[s_]:
+            f[f"{s_}:{fa[s_]}"] = f.get(f"{s_}:{fa[s_]}", 0) + 1
+            f[f"{s_}:{fb[s_]}"] = f.get(f"{s_}:{fb[s_]}", 0) - 1
+    return f
+
+
+def win_probability(a, b, t_ab=None, t_ba=None):
+    """P(a beats b): calibrated on killboard fights when knowledge/pvp_calibration.json exists, else the raw TTK model."""
+    t_ab = t_ab if t_ab is not None else _ttk(a, b)
+    t_ba = t_ba if t_ba is not None else _ttk(b, a)
+    cal = calibration_model()
+    if not cal:
+        return 1 / (1 + (t_ab / t_ba) ** DUEL_K)
+    w = cal["weights"]
+    z = sum(w.get(k, 0.0) * v for k, v in pair_features(a, b, t_ab, t_ba).items())
+    return 1 / (1 + math.exp(-max(min(z, 30), -30)))
+
+
 def duel(a, b):
     """{'win', 'lose', 'disengage', 'ttk_ab', 'ttk_ba'} for player a against player b (model)."""
     t_ab, t_ba = _ttk(a, b), _ttk(b, a)
-    p = 1 / (1 + (t_ab / t_ba) ** DUEL_K)
+    p = win_probability(a, b, t_ab, t_ba)
     loser, winner = (b, a) if p >= 0.5 else (a, b)
     lk, wk = loser["kit"], winner["kit"]
     esc = 0.1 + 0.08 * lk["dash30"] + 0.04 * lk["speed30"] + 0.02 * lk["invis30"] + 0.02 * lk["invuln30"] \
@@ -586,6 +640,138 @@ def duel(a, b):
     if p >= 0.5:  # b may get away
         return {"win": p * (1 - esc), "lose": 1 - p, "disengage": p * esc, "ttk_ab": t_ab, "ttk_ba": t_ba}
     return {"win": p, "lose": (1 - p) * (1 - esc), "disengage": (1 - p) * esc, "ttk_ab": t_ab, "ttk_ba": t_ba}
+
+
+# ------------------------------------------------------------------ backtest / calibration on the killboard
+KB_SLOTS = ("MainHand", "OffHand", "Head", "Armor", "Shoes", "Cape", "Potion", "Food")
+
+
+def _kb_loadout(p):
+    items = []
+    for sl in KB_SLOTS:
+        it = (p.get("Equipment") or {}).get(sl) or {}
+        t = it.get("Type")
+        if t and q1("SELECT 1 FROM items WHERE id=?", t):
+            e = {"item": t, "quality": it.get("Quality") or 1}
+            if it.get("ActiveSpells"):
+                e["activeSpells"] = it["ActiveSpells"]
+            if it.get("PassiveSpells"):
+                e["passiveSpells"] = it["PassiveSpells"]
+            items.append(e)
+    return {"name": p.get("Name") or "?", "equipment": items}
+
+
+def _is_fight(p):
+    eq = p.get("Equipment") or {}
+    mh = (eq.get("MainHand") or {}).get("Type") or ""
+    return mh and "TOOL" not in mh and "GATHERER" not in json.dumps(eq)
+
+
+def kb_pairs(servers=("europe", "west", "east"), pages=20):
+    """[(event id, features of killer vs victim, raw p(killer), IP gap)] for solo kills of armed, non-gathering players."""
+    out, seen = [], set()
+    for srv in servers:
+        for e in advisor._events(srv, pages):
+            if e["EventId"] in seen or (e.get("numberOfParticipants") or len(e.get("Participants") or [])) != 1:
+                continue
+            seen.add(e["EventId"])
+            K, V = e["Killer"], e["Victim"]
+            if not (_is_fight(K) and _is_fight(V)):
+                continue
+            try:
+                a = build_pvp_player(_kb_loadout(K), {"avg_ip": K["AverageItemPower"]})
+                b = build_pvp_player(_kb_loadout(V), {"avg_ip": V["AverageItemPower"]})
+                t_ab, t_ba = _ttk(a, b), _ttk(b, a)
+            except (AOError, KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+            out.append((e["EventId"], pair_features(a, b, t_ab, t_ba), 1 / (1 + (t_ab / t_ba) ** DUEL_K), a["eff_avg"] - b["eff_avg"]))
+    return out
+
+
+L2 = {"dense": 0.001, "kit": 0.5, "family": 0.03}  # chosen by 5-fold cross-validation on 1399 fights (2026-10-19)
+
+
+def _fit_logistic(rows, keep=None, iters=300, lr=0.5):
+    """L2 logistic regression without intercept on antisymmetric features (label: a = the killer). keep = feature filter."""
+    data = [{k: v for k, v in f.items() if keep is None or keep(k)} for f in rows]
+    w = defaultdict(float)
+    reg = lambda k: L2["family"] if ":" in k else (L2["kit"] if k in KIT_FEATURES else L2["dense"])
+    for _ in range(iters):
+        g = defaultdict(float)
+        for x in data:
+            pr = 1 / (1 + math.exp(-max(min(sum(w[k] * v for k, v in x.items()), 30), -30)))
+            for k, v in x.items():
+                g[k] += (1 - pr) * v
+        for k in set(g) | set(w):
+            w[k] += lr * (g[k] / len(data) - reg(k) * w[k])
+    return dict(w)
+
+
+def _predict(w, f):
+    return 1 / (1 + math.exp(-max(min(sum(w.get(k, 0.0) * v for k, v in f.items()), 30), -30)))
+
+
+def _metrics(ps):
+    """Accuracy, log-loss, calibration bins for predicted P(killer wins)."""
+    ps = [min(max(p, 1e-3), 1 - 1e-3) for p in ps]
+    bins = defaultdict(lambda: [0, 0])
+    for p in ps:
+        for q, won in ((p, 1), (1 - p, 0)):
+            b_ = min(int(q * 5), 4)
+            bins[b_][0] += 1
+            bins[b_][1] += won
+    return (sum(p > 0.5 for p in ps) / len(ps), -sum(math.log(p) for p in ps) / len(ps), {b_: v for b_, v in sorted(bins.items())})
+
+
+def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3):
+    """Backtest the duel model on killboard solo kills (killer vs victim with their real gear and IP): accuracy, log-loss and
+    calibration on a held-out split for IP-only, the raw TTK model and the calibrated feature model; fit=True refits the
+    calibration on all fights and saves it to knowledge/pvp_calibration.json (used by duel / pvp_check / pvp_tune)."""
+    srv = tuple(x.strip() for x in str(servers).split(",") if x.strip())
+    rows = kb_pairs(srv, pages)
+    if len(rows) < 100:
+        raise AOError(f"Only {len(rows)} usable fights — fetch more pages/servers")
+    test = [r for r in rows if r[0] % 10 < round(test_share * 10)]
+    train = [r for r in rows if r not in test]
+    o = [f"## PvP model backtest — {len(rows)} solo kills ({', '.join(srv)}, {pages} pages each); train {len(train)} / test {len(test)}", ""]
+    tr = [r[1] for r in train]
+    w_ip = _fit_logistic(tr, lambda k: k == "dip")
+    w_kit = _fit_logistic(tr, lambda k: ":" not in k)
+    w_all = _fit_logistic(tr)
+    res = {"IP gap only": [_predict(w_ip, r[1]) for r in test],
+           "raw duel simulation (TTK)": [r[2] for r in test],
+           "IP + simulated kit": [_predict(w_kit, r[1]) for r in test],
+           "IP + kit + items (calibrated)": [_predict(w_all, r[1]) for r in test]}
+    rows_t, cal_txt = [], []
+    for name, ps in res.items():
+        acc, ll, bins = _metrics(ps)
+        conf = [p for p in ps if abs(p - 0.5) >= 0.25]
+        rows_t.append((name, f"{acc:.1%}", f"{ll:.3f}", f"{len(conf)} ({len(conf) / len(ps):.0%}): "
+                       + (f"{sum(p > 0.5 for p in conf) / len(conf):.0%} right" if conf else "—")))
+        cal_txt.append(f"- {name}: " + "; ".join(f"{b_ * 20}–{b_ * 20 + 20}% → {v[1] / v[0]:.0%} (n={v[0]})" for b_, v in bins.items()))
+    o.append(table(rows_t, ["predictor (held-out fights)", "picks the killer", "log-loss (0.693 = coin)", "confident calls (≥75/≤25%)"]))
+    o.append("\n**Calibration** (predicted → observed win share):\n" + "\n".join(cal_txt))
+    o.append("\n**Weights** (train): " + ", ".join(f"{n} {w_all.get(n, 0):+.2f}" for n in ("dip",) + KIT_FEATURES)
+             + " — dip = per 100 effective IP; kit signals clipped to ±2.")
+    fam = sorted(((v, k) for k, v in w_all.items() if ":" in k), reverse=True)
+    if fam:
+        nm = lambda k: f"{k.split(':')[0]} {advisor._fam_name(k.split(':', 1)[1])}"
+        o.append("\n**Items that win more than their IP explains** (log-odds; +0.94 ≈ +100 IP): "
+                 + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[:8])
+                 + "\n**…and less:** " + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[-8:]))
+    if fit:
+        w_final = _fit_logistic([r[1] for r in rows])
+        acc, ll, _ = _metrics(res["IP + kit + items (calibrated)"])
+        cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4}, "n": len(rows), "servers": list(srv),
+               "trained": time.strftime("%Y-%m-%d"), "test_accuracy": round(acc, 4), "test_logloss": round(ll, 4)}
+        with open(CAL_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cal, fh, indent=1)
+        calibration_model.cache_clear()
+        o.append(f"\n✅ Saved calibration to `knowledge/pvp_calibration.json` (weights refit on all {len(rows)} fights). "
+                 "duel / pvp_check / pvp_tune now use it.")
+    o.append("\n_Killboard = fights that ended in a death in the open world (no IP cap): ambushes, third parties and fights "
+             "against mobs are mixed in. In capped content the IP weight is applied to the effective IP after the cap._")
+    return "\n".join(o)
 
 
 # ------------------------------------------------------------------ killboard field
