@@ -2,7 +2,7 @@
 import json, os, re, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, encounter, gearcheck, market, mcp_server, optimizer, patchnotes, pvp
+from aodb import advisor, combat, core, encounter, gearcheck, market, mcp_server, optimizer, patchnotes, pvp
 from aodb.tools import TOOLS, call
 
 
@@ -415,7 +415,10 @@ class Encounters(unittest.TestCase):
         self.assertFalse(market._absurd("T8_POTION_CLEANSE", 15_000))
 
     def test_meta_kits(self):
-        self.assertEqual(optimizer.armor_spells("ARMOR_CLOTH_SET2"), ("LIFESAVIOR", "PASSIVE_ARMOR_INCREASED_DAMAGE"))
+        act, pas = optimizer.armor_spells("ARMOR_CLOTH_SET2")  # the active with the best PvP value; passive by preference
+        opts = [o[0] for o in combat.weapon_spells("T4_ARMOR_CLOTH_SET2").get("passive", []) if not o[0].startswith("PASSIVE_")]
+        self.assertEqual(act, max((o for o in opts if o != "OUTOFCOMBATHEAL"), key=pvp.pvp_value))
+        self.assertEqual(pas, "PASSIVE_ARMOR_INCREASED_DAMAGE")
         act, pas = optimizer.armor_spells("ARMOR_PLATE_AVALON")                 # artifact armor: actives and passives mixed in data
         self.assertFalse(act.startswith("PASSIVE_"))
         self.assertTrue(pas.startswith("PASSIVE_"))
