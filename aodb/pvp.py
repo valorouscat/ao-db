@@ -408,7 +408,7 @@ def build_pvp_player(lo, ip_spec=None, rules=None, intents=None):
     avg, rows = gearcheck.loadout_ip(entries, ip_spec.get("spec_ip", 0), ip_spec.get("weapon_ip"),
                                      ip_spec.get("slot_ip") or raw.get("slot_ip"), ip_spec.get("avg_ip") or raw.get("avg_ip"))
     eff_rows = [[r[0], effective_ip(r[1], rules) if rules else r[1], *r[2:]] for r in rows]
-    eff_avg = sum(r[1] * r[2] for r in eff_rows) / max(sum(r[2] for r in eff_rows), 1)
+    eff_avg = sum(r[1] * r[2] for r in eff_rows) / max(sum(r[2] for r in eff_rows), len(gearcheck.COMBAT_SLOTS))  # empty slot = 0
     hp_given = ip_spec.get("hp") or raw.get("hp")
     # food / potions are modelled below (const_buffs, potion casts) — the calibration was fitted that way, so keep them out of
     # the item stats that gearcheck.player_stats now also fills from consumables (PvE uses those)
@@ -615,10 +615,12 @@ def pair_features(a, b, t_ab=None, t_ba=None):
          "cc": clip((ka["cc30"] + ka["root30"] - kb["cc30"] - kb["root30"]) / 10), "escape": clip((esc(ka) - esc(kb)) / 10),
          "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)}
     fa, fb = _families(a), _families(b)
-    for s_ in FAMILY_SLOTS:
+    for s_ in FAMILY_SLOTS:  # an empty slot is not an item: its learned "effect" was who plays without a cape, not gear power
         if fa[s_] != fb[s_]:
-            f[f"{s_}:{fa[s_]}"] = f.get(f"{s_}:{fa[s_]}", 0) + 1
-            f[f"{s_}:{fb[s_]}"] = f.get(f"{s_}:{fb[s_]}", 0) - 1
+            if fa[s_] != "none":
+                f[f"{s_}:{fa[s_]}"] = f.get(f"{s_}:{fa[s_]}", 0) + 1
+            if fb[s_] != "none":
+                f[f"{s_}:{fb[s_]}"] = f.get(f"{s_}:{fb[s_]}", 0) - 1
     return f
 
 

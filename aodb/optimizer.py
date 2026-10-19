@@ -505,8 +505,8 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
                     g_ = gear(f, lv)
                     if g_:
                         cands.append(dict(eq, **{slot: g_}))
-            if slot == "cape":
-                cands.append({k: v for k, v in eq.items() if k != "cape"})
+            # no "drop the cape" candidate: the IP average runs over worn slots, so removing a cheap low-IP cape looks like
+            # an IP gain while the game simply loses the cape's stats and passive
         for c in cands:
             sc = evaluate(c)[0]
             if sc > best_sc + MIN_GAIN:

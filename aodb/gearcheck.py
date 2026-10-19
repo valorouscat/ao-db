@@ -124,7 +124,8 @@ def loadout_ip(entries, spec_ip=0, weapon_ip=None, slot_ip=None, avg_ip=None):
             rows.append([slot, it["itempower"] + QUALITY_IP.get(e["quality"], 0) + spec_ip, w, "item+quality" + (" +spec" if spec_ip else "")])
     if not rows:
         raise AOError("No combat items (weapon/armor/cape) in the loadout")
-    n = sum(r[2] for r in rows)
+    # the game averages over all six combat slots (2H weapon = both hands): an empty slot counts as 0, it doesn't drop out
+    n = max(sum(r[2] for r in rows), len(COMBAT_SLOTS))
     if avg_ip:
         free = [r for r in rows if r[3] not in ("given", "loadout")]
         if free:
