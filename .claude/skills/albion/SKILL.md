@@ -58,6 +58,8 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
    (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
    comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.
    Market API rate limited? Say so, give the item list, and use `history` or `price` later.
+   **Hand over recommended sets ready to import:** `loadout_export` (start from the user's export with `loadout`, swap items,
+   `tier`/`enchant`/`quality` for all gear, `spells` by name) → paste the JSON line from its output in the answer.
 4. **Answer format:**
    - **Recommendation** (concrete item IDs, with icons `![](https://render.albiononline.com/v1/item/<ID>.png?size=48)`)
    - **Why**: evidence bullets, each with its source (tool + ID, killboard numbers, or a link)

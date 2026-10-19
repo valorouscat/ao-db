@@ -153,6 +153,15 @@ TOOLS = [
                      content=P(S, "green / blue / gold", "green"), tier=P(I, "Tier", 6), stage=P(S, "small / medium / large", "large"),
                      ips=P(S, "In-game IP incl. mastery and max HP"), intents=P(S, "Spell choice in words"),
                      dodge=P(N, "Dodge share", 0.9), dodge_low=P(N, "Pessimistic dodge", 0.5))),
+    dict(name="loadout_export", fn=gearcheck.loadout_export,
+         desc="Write a loadout in the game's import format (JSON, version 1): from an exported loadout and/or a list of items; swap "
+              "items per slot, retier all gear (tier/enchant), set quality and spells (by ID or name, validated against the item). "
+              "Use to hand the user a recommended set ready to import.",
+         params=dict(items=P(A, "Items to put in (IDs/names, '2x T8_POTION_COOLDOWN'); each replaces the item in its slot"),
+                     loadout=P(S, "Existing loadout JSON (in-game export) or @file to start from"), name=P(S, "Loadout name"),
+                     spells=P(S, "Spells: 'q=Heroic Strike; w=Hamstring; e=Spinning Blades; p=Deep Cuts; head=Retaliate/Balanced Mind'"),
+                     quality=P(I, "Quality 1-5 for all gear"), tier=P(I, "Tier for all gear (4-8)"),
+                     enchant=P(I, "Enchantment for all gear (0-4)"), icon=P(I, "Loadout icon id"), color=P(I, "Loadout color id"))),
     dict(name="build_optimizer", fn=optimizer.build_optimizer,
          desc="Find the most effective builds per silver for a PvPvE content (Mists, corrupted dungeons, hellgate PvE): every weapon "
               "of the chosen classes × armor kits × item-power levels, each simulated on the content's camps/rooms and dueled "

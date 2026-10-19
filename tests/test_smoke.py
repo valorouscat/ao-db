@@ -92,6 +92,23 @@ LOADOUT = {"name": "bow", "equipment": [
     {"item": "T4_CAPEITEM_FW_THETFORD@2", "quality": 3}, {"item": "T8_POTION_CLEANSE"}, {"item": "T7_MEAL_ROAST", "stack": 3}]}
 
 
+class LoadoutExport(unittest.TestCase):
+    def test_export_roundtrip(self):
+        t = gearcheck.loadout_export(loadout=json.dumps(LOADOUT), enchant=2, spells="w=Frost Shot; head=Energizing Shield")
+        js = json.loads(re.search(r"```json\n(.+)\n```", t).group(1))
+        eq = {e["item"].split("@")[0]: e for e in js["equipment"]}
+        self.assertEqual(js["version"], 1)
+        self.assertEqual(eq["T6_2H_BOW_KEEPER"]["item"], "T6_2H_BOW_KEEPER@2")
+        self.assertEqual(eq["T6_2H_BOW_KEEPER"]["activeSpells"][0], "MULTISHOT2")
+        self.assertEqual(eq["T7_MEAL_ROAST"]["stack"], 3)
+        self.assertNotIn("quality", eq["T8_POTION_CLEANSE"])
+        self.assertEqual(gearcheck.parse_loadout(json.dumps(js))[0], "bow")
+
+    def test_export_rejects_foreign_spell(self):
+        with self.assertRaises(core.AOError):
+            gearcheck.loadout_export(items=["T5_2H_DUALSWORD"], spells="w=Fireball")
+
+
 class GearCheck(unittest.TestCase):
     def test_ip_and_kit(self):
         _, entries = gearcheck.parse_loadout(json.dumps(LOADOUT))
