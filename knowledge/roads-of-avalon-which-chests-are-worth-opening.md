@@ -24,7 +24,7 @@ Takeaways:
 - `*_BASE` chests are worth 2–15% of a boss chest of the same size: skip them unless they are on your way.
   `*_CHAMPION` chests sit in between; `*_BOSS` chests carry most of the value.
 - Rarity matters only for chests that can roll it. Veteran boss: uncommon ≈ 96k → legendary ≈ 204k model value.
-  Small chests can't become rare/legendary (patch notes).
+  Current data: every BOSS chest (small too) rolls uncommon 60% / rare 30% / legendary 10%; the 2023 note "small chests can't become rare/legendary" is outdated.
 - Value comes mostly from rare high-value drops (T8 bags, Avalonian capes, capes), so single chests vary a lot.
 - Every chest type has `triggermobspawn=true`: opening it spawns guards, so time and risk scale with chest size.
 
