@@ -582,6 +582,8 @@ def _ttk(a, b):
 
 CAL_PATH = os.path.join(core.ROOT, "knowledge", "pvp_calibration.json")
 KIT_FEATURES = ("logttk", "burst", "cc", "escape", "ranged", "hp")
+SLOT_IP_FEATURES = ("ip_weapon", "ip_head", "ip_chest", "ip_shoes", "ip_cape")
+CALIBRATED = lambda k: k != "dip"  # per-slot IP instead of the character average (they are collinear)
 FAMILY_SLOTS = ("mainhand", "offhand", "head", "armor", "shoes", "cape")
 
 
@@ -610,10 +612,14 @@ def pair_features(a, b, t_ab=None, t_ba=None):
     ba, bb = _hit(a, b)[0], _hit(b, a)[0]
     esc = lambda k: k["dash30"] + k["invis30"] / 3 + k["invuln30"]
     clip = lambda x: max(min(x, 2.0), -2.0)
-    f = {"dip": (a["eff_avg"] - b["eff_avg"]) / 100, "logttk": clip(math.log(max(t_ba, 0.1) / max(t_ab, 0.1))),
+    slot_ip = lambda p: {r[0]: r[1] for r in p["eff_rows"]}  # per-slot IP after the cap: each item's stats scale with its own IP
+    sa, sb = slot_ip(a), slot_ip(b)
+    grp = {"weapon": ("mainhand", "offhand"), "head": ("head",), "chest": ("armor",), "shoes": ("shoes",), "cape": ("cape",)}
+    f = {f"ip_{g}": sum(sa.get(x, 0) - sb.get(x, 0) for x in sl) / 100 / len(sl) for g, sl in grp.items()}
+    f.update({"dip": (a["eff_avg"] - b["eff_avg"]) / 100, "logttk": clip(math.log(max(t_ba, 0.1) / max(t_ab, 0.1))),
          "burst": clip(min(ba / b["stats"]["hp"], 2) - min(bb / a["stats"]["hp"], 2)),
          "cc": clip((ka["cc30"] + ka["root30"] - kb["cc30"] - kb["root30"]) / 10), "escape": clip((esc(ka) - esc(kb)) / 10),
-         "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)}
+         "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)})
     fa, fb = _families(a), _families(b)
     for s_ in FAMILY_SLOTS:  # an empty slot is not an item: its learned "effect" was who plays without a cape, not gear power
         if fa[s_] != fb[s_]:
@@ -794,11 +800,13 @@ def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3
          f"test {len(test)} (newest {test_share:.0%})", ""]
     tr = [r[1] for r in train]
     w_ip = _fit_logistic(tr, lambda k: k == "dip")
-    w_kit = _fit_logistic(tr, lambda k: ":" not in k)
-    w_all = _fit_logistic(tr)
+    w_slot = _fit_logistic(tr, lambda k: k in SLOT_IP_FEATURES)
+    w_kit = _fit_logistic(tr, lambda k: k in SLOT_IP_FEATURES or k in KIT_FEATURES)
+    w_all = _fit_logistic(tr, CALIBRATED)
     res = {"IP gap only": [_predict(w_ip, r[1]) for r in test],
+           "per-slot IP gaps": [_predict(w_slot, r[1]) for r in test],
            "raw duel simulation (TTK)": [r[2] for r in test],
-           "IP + simulated kit": [_predict(w_kit, r[1]) for r in test],
+           "per-slot IP + simulated kit": [_predict(w_kit, r[1]) for r in test],
            "IP + kit + items (calibrated)": [_predict(w_all, r[1]) for r in test]}
     rows_t, cal_txt = [], []
     for name, ps in res.items():
@@ -809,16 +817,16 @@ def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3
         cal_txt.append(f"- {name}: " + "; ".join(f"{b_ * 20}–{b_ * 20 + 20}% → {v[1] / v[0]:.0%} (n={v[0]})" for b_, v in bins.items()))
     o.append(table(rows_t, ["predictor (held-out fights)", "picks the killer", "log-loss (0.693 = coin)", "confident calls (≥75/≤25%)"]))
     o.append("\n**Calibration** (predicted → observed win share):\n" + "\n".join(cal_txt))
-    o.append("\n**Weights** (train): " + ", ".join(f"{n} {w_all.get(n, 0):+.2f}" for n in ("dip",) + KIT_FEATURES)
-             + " — dip = per 100 effective IP; kit signals clipped to ±2.")
+    o.append("\n**Weights** (train): " + ", ".join(f"{n} {w_all.get(n, 0):+.2f}" for n in SLOT_IP_FEATURES + KIT_FEATURES)
+             + " — ip_* = per 100 effective IP of that slot (each item's stats scale with its own IP); kit signals clipped to ±2.")
     fam = sorted(((v, k) for k, v in w_all.items() if ":" in k), reverse=True)
     if fam:
         nm = lambda k: f"{k.split(':')[0]} {advisor._fam_name(k.split(':', 1)[1])}"
-        o.append("\n**Items that win more than their IP explains** (log-odds; +0.94 ≈ +100 IP): "
+        o.append("\n**Items that win more than their IP explains** (log-odds): "
                  + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[:8])
                  + "\n**…and less:** " + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[-8:]))
     if fit:
-        w_final = _fit_logistic([r[1] for r in rows])
+        w_final = _fit_logistic([r[1] for r in rows], CALIBRATED)
         acc, ll, _ = _metrics(res["IP + kit + items (calibrated)"])
         cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4}, "n": len(rows),
                "period": [rows[0][0], rows[-1][0]],
