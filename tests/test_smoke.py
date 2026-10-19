@@ -92,6 +92,64 @@ LOADOUT = {"name": "bow", "equipment": [
     {"item": "T4_CAPEITEM_FW_THETFORD@2", "quality": 3}, {"item": "T8_POTION_CLEANSE"}, {"item": "T7_MEAL_ROAST", "stack": 3}]}
 
 
+class PvpSpellModel(unittest.TestCase):
+    def test_defense_rating_and_reflect(self):
+        self.assertAlmostEqual(pvp.defense_dr(1.17), 1 - 1 / 2.17)
+        r = pvp.pvp_spell("RETALIATE2")
+        self.assertAlmostEqual(r["reflectpk"], 0.85)
+        self.assertGreater(r["dr_p"], 0)
+
+    def test_immunities_and_conditions(self):
+        self.assertFalse(pvp.pvp_spell("CASTBUBBLE").get("invuln"))  # immune to knockbacks only, not to damage
+        self.assertFalse(pvp.pvp_spell("DELAYED_TELEPORT").get("invuln"))  # AIR_RAID sits in a condition, not a cast
+        self.assertFalse(pvp.pvp_spell(core.item_json("T7_POTION_MOB_RESET@3")["@consumespell"]).get("invis"))  # mobs only
+
+    def test_potion_and_cape(self):
+        self.assertEqual(pvp.potion_damage("POTION_POISON_P5"), (475.0, True))
+        proc = pvp.cape_proc("PASSIVE_CAPE_SMUGGLER")
+        self.assertTrue(proc[2])
+        self.assertGreaterEqual(proc[1], 100)
+
+    def test_armor_spells_autopicked(self):
+        p = pvp.build_pvp_player(json.dumps({"equipment": [{"item": "T5_2H_DUALSWORD@1"}, {"item": "T5_ARMOR_LEATHER_SET1@1"}]}))
+        self.assertTrue(any(sl == "armor" for sl, _ in p["spells"]))
+
+    def test_tune(self):
+        t = pvp.pvp_tune(json.dumps(LOADOUT), "stalker", vs="ranged", opp_ip=1300, slots="head,food", passes=1)
+        self.assertIn("### Import", t)
+        self.assertIn("score", t)
+
+
+class BuildSearch(unittest.TestCase):
+    def test_out_of_combat_spell_is_inert(self):
+        self.assertEqual(pvp.pvp_spell("OUTOFCOMBATHEAL")["heal"], 0.0)
+
+    def test_search_respects_budget(self):
+        with mock.patch.object(pvp, "field", return_value=([{"loadout": LOADOUT, "ip": 1100, "n": 1, "kills": 1, "deaths": 0, "kd": 1}], [1100], 1)):
+            t = optimizer.build_search("corrupted_stalker", budget=120000, classes="sword", weapons=1, passes=1, maps=1,
+                                       levels="800,900")
+        self.assertIn("### #1", t)
+        costs = [int(x.replace(",", "")) for x in re.findall(r"— ([\d,]+)\n- mainhand", t)]
+        self.assertTrue(costs and all(c <= 120000 for c in costs))
+
+
+class LoadoutExport(unittest.TestCase):
+    def test_export_roundtrip(self):
+        t = gearcheck.loadout_export(loadout=json.dumps(LOADOUT), enchant=2, spells="w=Frost Shot; head=Energizing Shield")
+        js = json.loads(re.search(r"```json\n(.+)\n```", t).group(1))
+        eq = {e["item"].split("@")[0]: e for e in js["equipment"]}
+        self.assertEqual(js["version"], 1)
+        self.assertEqual(eq["T6_2H_BOW_KEEPER"]["item"], "T6_2H_BOW_KEEPER@2")
+        self.assertEqual(eq["T6_2H_BOW_KEEPER"]["activeSpells"][0], "MULTISHOT2")
+        self.assertEqual(eq["T7_MEAL_ROAST"]["stack"], 3)
+        self.assertNotIn("quality", eq["T8_POTION_CLEANSE"])
+        self.assertEqual(gearcheck.parse_loadout(json.dumps(js))[0], "bow")
+
+    def test_export_rejects_foreign_spell(self):
+        with self.assertRaises(core.AOError):
+            gearcheck.loadout_export(items=["T5_2H_DUALSWORD"], spells="w=Fireball")
+
+
 class GearCheck(unittest.TestCase):
     def test_ip_and_kit(self):
         _, entries = gearcheck.parse_loadout(json.dumps(LOADOUT))

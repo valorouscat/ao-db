@@ -948,3 +948,166 @@ def calibration():
                                                       "target", "error", "notes"]) +
             (f"\n\nOffset applied to gear_check/group_check margins: **{cal['offset']:+.0f} IP** (mean error, cap ±{CAL_CAP}; "
              f"{cal['runs']} runs in {cal['n']} entries, spread ±{cal['spread']:.0f})." if cal else ""))
+
+
+# ------------------------------------------------------------------ export (in-game import JSON)
+EXPORT_SLOTS = ("mainhand", "offhand", "head", "armor", "shoes", "bag", "cape", "mount", "potion", "food")
+EXPORT_DEFAULTS = {"icon": 20, "color": 10}  # values from a real in-game export; the game rejects unknown ones
+WEAPON_KEYS = {"q": 0, "w": 1, "e": 2}
+
+
+def _slot_spells(iid):
+    """(active options per Q/W/E or None, passive options) of an item: [(spell_id, name_en, name_ru)]."""
+    it = q1("SELECT base_id, slot FROM items WHERE id=?", iid)
+    if it["slot"] == "mainhand":
+        kit_ = combat.weapon_spells(it["base_id"])
+        return ([[o[:3] for o in kit_.get(s, [])] for s in ("1", "2", "3")],
+                [o[:3] for o in kit_.get("passive", [])])
+    rows = q("SELECT s.spell_id, sp.name_en, sp.name_ru, sp.kind FROM item_spells s LEFT JOIN spells sp ON sp.id=s.spell_id "
+             "WHERE s.item_id=?", it["base_id"])
+    return ([[(r["spell_id"], r["name_en"], r["name_ru"]) for r in rows if r["kind"] != "passivespell"]],
+            [(r["spell_id"], r["name_en"], r["name_ru"]) for r in rows if r["kind"] == "passivespell"])
+
+
+def _match_spell(text, options, iid):
+    t = text.strip().lower()
+    for sid, en, ru in options:
+        if t in (sid.lower(), (en or "").lower(), (ru or "").lower()):
+            return sid
+    hits = [o for o in options if t in f"{o[0]} {o[1] or ''} {o[2] or ''}".lower()]
+    if len(hits) == 1:
+        return hits[0][0]
+    names = ", ".join(f"{o[1]} ({o[0]})" for o in options) or "none"
+    raise AOError(f"Spell {text!r} is not available on {iid}. Options: {names}")
+
+
+def _parse_spell_spec(spec):
+    """'q=Hamstring; w=Blade Cyclone; head=Retaliate/Balanced Mind' → {slot: (actives or None, passive or None)}.
+    q/w/e/p are the weapon's Q/W/E and passive; for armor 'slot=active/passive'."""
+    out = {}
+    for part in re.split(r"[;\n]+", spec or ""):
+        if not part.strip():
+            continue
+        if "=" not in part:
+            raise AOError(f"Spell spec needs 'slot=spell': {part!r}")
+        k, v = (x.strip() for x in part.split("=", 1))
+        k = k.lower()
+        if k in WEAPON_KEYS:
+            out.setdefault("mainhand", {})[WEAPON_KEYS[k]] = v
+        elif k in ("p", "passive"):
+            out.setdefault("mainhand", {})["passive"] = v
+        elif k in EXPORT_SLOTS:
+            act, _, pas = v.partition("/")
+            d = out.setdefault(k, {})
+            if act.strip():
+                d[0] = act.strip()
+            if pas.strip():
+                d["passive"] = pas.strip()
+        else:
+            raise AOError(f"Unknown spell slot {k!r}: use q/w/e/p or {', '.join(EXPORT_SLOTS)}")
+    return out
+
+
+def _retier(iid, tier, enchant):
+    it = q1("SELECT base_id, tier, enchant FROM items WHERE id=?", iid)
+    base = it["base_id"]
+    if tier and it["tier"]:
+        base = re.sub(r"^T\d", f"T{tier}", base)
+    e = it["enchant"] if enchant is None else enchant
+    new = base + (f"@{e}" if e else "")
+    return new if q1("SELECT 1 FROM items WHERE id=?", new) else None
+
+
+def loadout_export(items=None, loadout=None, name=None, spells=None, quality=None, tier=None, enchant=None, icon=None, color=None):
+    """Loadout JSON in the game's import format (version 1): start from an existing export and/or a list of items, swap
+    items per slot, change tier/enchant/quality of all gear, set spells by ID or name. Validates items and spells."""
+    base = _raw_loadout(loadout) if loadout else {}
+    by_slot, notes = {}, []
+    for e in base.get("equipment") or []:
+        iid = resolve_item(e["item"])
+        by_slot[q1("SELECT slot FROM items WHERE id=?", iid)["slot"] or iid] = dict(e, item=iid)
+    for raw in items or []:
+        m = re.match(r"^\s*(\d+)\s*[xх×]\s*(.+)$", raw)
+        qty, text = (int(m.group(1)), m.group(2)) if m else (None, raw)
+        iid = resolve_item(text)
+        slot = q1("SELECT slot FROM items WHERE id=?", iid)["slot"]
+        if slot not in EXPORT_SLOTS:
+            raise AOError(f"{iid} is not equippable (slot: {slot})")
+        old = by_slot.get(slot)
+        e = {"item": iid}
+        if old and q1("SELECT base_id FROM items WHERE id=?", old["item"])["base_id"].split("_", 1)[1:] == \
+                q1("SELECT base_id FROM items WHERE id=?", iid)["base_id"].split("_", 1)[1:]:
+            e = dict(old, item=iid)  # same item family at another tier/enchant: keep spells and settings
+        elif old:
+            e.update({k: old[k] for k in ("quality", "pref") if k in old})
+        if qty:
+            e["stack"] = qty
+        by_slot[slot] = e
+    if not by_slot:
+        raise AOError("Give items and/or a loadout JSON to export")
+    for slot, e in by_slot.items():
+        if slot in ("potion", "food", "mount"):
+            continue
+        if (tier or enchant is not None) and slot != "bag":  # bag tier only changes carry weight, not IP
+            new = _retier(e["item"], tier, enchant)
+            if new:
+                e["item"] = new
+            else:
+                notes.append(f"{e['item']}: no {tier or ''}.{enchant if enchant is not None else ''} variant, kept as is")
+        if quality:
+            e["quality"] = int(quality)
+    for slot, d in _parse_spell_spec(spells).items():
+        if slot not in by_slot:
+            raise AOError(f"No item in slot {slot} to put spells on")
+        e = by_slot[slot]
+        actives, passives = _slot_spells(e["item"])
+        cur = list(e.get("activeSpells") or [])
+        for idx, text in ((k, v) for k, v in d.items() if k != "passive"):
+            opts = actives[idx] if idx < len(actives) else []
+            while len(cur) <= idx:
+                cur.append(None)
+            cur[idx] = _match_spell(text, opts, e["item"])
+        if cur:
+            e["activeSpells"] = cur
+        if "passive" in d:
+            e["passiveSpells"] = [_match_spell(d["passive"], passives, e["item"])]
+    rows, out_eq = [], []
+    for slot in sorted(by_slot, key=lambda s: EXPORT_SLOTS.index(s) if s in EXPORT_SLOTS else 99):
+        e = by_slot[slot]
+        actives, passives = _slot_spells(e["item"]) if slot not in ("potion", "food", "mount", "bag") else ([], [])
+        allowed = {o[0] for opts in actives for o in opts} | {o[0] for o in passives}
+        act = [s for s in (e.get("activeSpells") or []) if s]
+        if slot == "mainhand" and len(act) < len([o for o in actives if o]):
+            act = act + combat.pick_spells(e["item"])[len(act):]
+            notes.append(f"{e['item']}: missing weapon spells filled by max damage")
+        for sid in act + list(e.get("passiveSpells") or []):
+            if allowed and sid not in allowed:
+                notes.append(f"⚠ {sid} is not a spell of {e['item']} — the game will reset it")
+        ent = {"item": e["item"]}
+        if slot not in ("potion", "food"):
+            ent["quality"] = int(e.get("quality") or 1)
+        if act:
+            ent["activeSpells"] = act
+        if e.get("passiveSpells"):
+            ent["passiveSpells"] = list(e["passiveSpells"])
+        for k in ("pref", "stack"):
+            if e.get(k):
+                ent[k] = e[k]
+        out_eq.append(ent)
+        sp = ", ".join((q1("SELECT name_en FROM spells WHERE id=?", s) or {"name_en": s})["name_en"] for s in act + ent.get("passiveSpells", []))
+        it = q1("SELECT itempower FROM items WHERE id=?", e["item"])
+        ipv = (it["itempower"] or 0) + QUALITY_IP.get(ent.get("quality", 1), 0) if it["itempower"] else ""
+        rows.append((slot, f"![](https://render.albiononline.com/v1/item/{e['item']}.png?size=32) {label(e['item'])}",
+                     core.QUALITY_NAMES.get(ent.get("quality"), "") if "quality" in ent else "", ipv, e.get("stack") or "", sp))
+    res = {"version": base.get("version", 1), "name": name or base.get("name") or "ao-db",
+           "icon": icon if icon is not None else base.get("icon", EXPORT_DEFAULTS["icon"]),
+           "color": color if color is not None else base.get("color", EXPORT_DEFAULTS["color"]), "equipment": out_eq}
+    js = json.dumps(res, ensure_ascii=False, separators=(",", ":"))
+    try:
+        avg, _ = loadout_ip(parse_loadout(js)[1])
+        avg_txt = f"Base IP ≈ **{avg:.0f}** (item + quality, no mastery). "
+    except AOError:
+        avg_txt = ""
+    return (f"## Loadout export: {res['name']}\n" + table(rows, ["slot", "item", "quality", "IP", "stack", "spells"]) +
+            "\n\n" + avg_txt + "Copy the line below and import it in the game's loadout window.\n\n```json\n" + js + "\n```" +
+            ("\n\n" + "\n".join(f"- {n}" for n in notes) if notes else ""))

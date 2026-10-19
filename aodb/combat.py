@@ -522,6 +522,9 @@ def spell_defense(sid):
     d = spell_json(sid)
     if not d:
         return None
+    if d.get("@usableincombat") == "false":  # Mend Wounds & co: no effect during a fight
+        return {"shield_ps": 0.0, "heal_self_ps": 0.0, "heal_ally_ps": 0.0, "heal_pct_ps": 0.0, "lifesteal": 0.0, "cc_frac": 0.0,
+                "invuln_frac": 0.0, "aoe": False}
     w = DefWalk()
     w.spell(sid)
     cycle = max(num(d.get("@recastdelay")) or 0, GCD) + (num(d.get("@castingtime")) or 0)

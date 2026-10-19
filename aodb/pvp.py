@@ -4,7 +4,7 @@ split by fight size, build search and a farm plan (reward multipliers vs death r
 
 Everything combat-related is a model on top of spells.json / items.json: compare options, don't read it as a guarantee.
 """
-import functools, json, math, statistics
+import functools, json, math, os, re, statistics, time
 from collections import Counter, defaultdict
 from . import core, combat, gearcheck, market, advisor
 from .core import AOError, q1, label, money, table
@@ -95,75 +95,137 @@ def effective_ip(ip, rules):
 
 
 # ------------------------------------------------------------------ spells vs players
+def defense_dr(x):
+    """Damage reduction of a Defense / % resistance bonus: damage × 1/(1+x) (Defense +117% = −54% damage)."""
+    return 1 - 1 / (1 + max(x, 0))
+
+
 class PvpWalk:
-    """PvP-relevant effects of one cast: CC on enemies, escapes, defenses, purge/cleanse, anti-heal, armor shred."""
+    """PvP-relevant effects of one cast: CC on enemies, escapes, defenses, purge/cleanse, anti-heal, armor shred, damage
+    reduction / damage buffs / weakening (value × seconds), reflected damage, cast interrupts.
+    Conditions (If…/not/and/or) are not followed; mob-only effects are skipped; effects of short-radius auras / areas around
+    the caster count at REACH (a ranged opponent is inside them only part of the time)."""
     HARD = ("stun", "silence", "fear", "sleep", "imprison", "cannotattack")
+    DMG_TYPES = {"physicalattackdamagebonus": "p", "physicalspelldamagebonus": "p", "magicattackdamagebonus": "m",
+                 "magicspelldamagebonus": "m"}
+    REACH = 0.5
+    CLOSE_RADIUS = 8.0
 
     def __init__(self):
         self.v = defaultdict(float)
         self.seen = set()
 
-    def spell(self, sid, depth=0):
+    BUFF_WINDOW = 15.0  # a buff counts at most this long (charge buffs carry 100 s timers that the parent ends early)
+
+    def spell(self, sid, depth=0, ctx="", mult=1.0, own_mult=1.0, window=None):
         d = combat.spell_json(sid)
         if not d or sid in self.seen or depth > 6:
             return
         self.seen.add(sid)
-        self.walk(d, depth)
+        self.walk(d, depth, ctx, mult, own_mult, window)
 
-    def walk(self, n, depth):
+    @staticmethod
+    def _condition(k):
+        return k.startswith("If") or k in ("not", "and", "or")
+
+    def walk(self, n, depth, ctx="", mult=1.0, own_mult=1.0, window=None):
         if not isinstance(n, dict) or depth > 10:
             return
         v = self.v
         for k, val in n.items():
-            if k.startswith("@") or k in combat.SKIP_KEYS:
+            if k.startswith("@") or k in combat.SKIP_KEYS or self._condition(k):
                 continue
             for ch in combat._aslist(val):
                 if not isinstance(ch, dict):
                     continue
                 t = (ch.get("@target") or "").lower()
-                enemy, own = "enemy" in t, t in ("self", "", "caster")
-                sec = core.num(ch.get("@time")) or 0
+                if t.endswith("mobs") or "IfClusterArcheType" in ch:  # mob-only / arena-only variants of the effect
+                    continue
+                # effects of a spell applied to the enemy (proc on hit, debuff) target "self" inside: they hit the enemy
+                enemy = "enemy" in t or (ctx == "enemy" and t in ("self", "", "target", "all"))
+                own = not enemy and t in ("self", "", "caster", "friendall", "all")
+                conditional = any(self._condition(x) for x in ch)
+                sec = min(core.num(ch.get("@time")) or 0, window or self.BUFF_WINDOW)
+                m = mult if enemy else own_mult
                 if k in self.HARD and enemy:
-                    v["cc_hard"] += sec
+                    v["cc_hard"] += sec * m
                 elif k == "knockback" and enemy:
-                    v["cc_hard"] += 0.5
+                    v["cc_hard"] += 0.5 * m
+                elif k == "interruptcast" and enemy and not conditional:
+                    v["cc_hard"] += 0.5 * m  # a cancelled cast: worth about half a second of hard CC on a caster
                 elif k == "root" and enemy:
-                    v["root"] += sec
+                    v["root"] += sec * m
                 elif k == "dash":
                     v["dash"] += 1
                 elif k == "buffovertime":
                     typ, value = ch.get("@type"), core.num(ch.get("@value")) or 0
                     if typ == "movespeedbonus" and enemy and value < 0:
-                        v["slow"] += -value * sec
+                        v["slow"] += -value * sec * m
                     elif typ == "movespeedbonus" and own and value > 0:
-                        v["speed"] += value * sec
+                        v["speed"] += value * sec * m
                     elif typ in ("physicalarmor", "magicresistance") and own and value > 0:
-                        v["resist"] += value * sec / 2
+                        if value <= 1:  # "damage resistances +20%": relative, counted like Defense on that damage type
+                            v["dr_" + typ[0]] += defense_dr(value) * sec * m
+                            v["drpk_" + typ[0]] = max(v["drpk_" + typ[0]], defense_dr(value))
+                        else:
+                            v["resist"] += value * sec / 2 * m
                     elif typ in ("physicalarmor", "magicresistance") and enemy and value < 0:
-                        v["shred"] += -value * sec / 2
+                        v["shred"] += (-value * sec / 2 if value < -1 else -value * 100 * sec / 2) * m
+                    elif typ == "bonusdefensevsplayers" and own and value > 0:
+                        for x in ("p", "m"):
+                            v["dr_" + x] += defense_dr(value) * sec * m
+                            v["drpk_" + x] = max(v["drpk_" + x], defense_dr(value))
+                    elif typ in self.DMG_TYPES and own:
+                        v["dmg_" + self.DMG_TYPES[typ]] += value * sec / 2 * m  # attack + spell bonus pair = one damage bonus (± self-debuff)
+                    elif typ in self.DMG_TYPES and enemy and value < 0:
+                        v["weaken_" + self.DMG_TYPES[typ]] += -value * sec / 2 * m
+                    elif typ == "attackspeedbonus" and own and value > 0:
+                        v["aspd"] += value * sec * m
+                    elif typ == "magiccooldownreduction" and own and value > 0:  # "Cooldown Rate +x"
+                        v["cdr"] += value * sec * m
+                    elif typ == "hitpointsmaxbonus" and own and 0 < value <= 1:
+                        v["hpbuff"] += value * sec
                     elif typ == "healmodifier" and enemy and value < 0:
-                        v["antiheal"] += -value * sec
-                    elif typ == "crowdcontrolresistance" and own and value > 0:
-                        v["ccres"] += value * sec
+                        v["antiheal"] += -value * sec * m
+                    elif typ in ("crowdcontrolresistance", "bonusccrvsplayers") and own and value > 0:
+                        v["ccres"] += defense_dr(value) * sec  # CC duration × 1/(1+x)
+                elif k == "reflectdamageactive" and own:
+                    v["reflect"] += (core.num(ch.get("@amountpercent")) or 0) * sec
+                    v["reflectpk"] = max(v["reflectpk"], core.num(ch.get("@amountpercent")) or 0)
                 elif k in ("invincibility", "nothittable", "notselectable") and own:
                     v["invuln"] += sec
                 elif k == "spellimmunity" and own:
-                    v["invuln"] += sec * 0.5  # immune to one category only
-                elif k == "invisibility" and own:
+                    cat = (ch.get("@category") or "").lower()
+                    if cat == "damage":
+                        v["invuln"] += sec
+                    elif cat == "crowdcontrol":
+                        v["ccimmune"] = max(v["ccimmune"], sec)
+                    # forcedmovement / purge / buff / heal immunities don't stop damage
+                elif k == "invisibility" and own and (ch.get("@to") or "everyone").lower() in ("everyone", "players"):
                     v["invis"] += sec
                 elif k == "cceffectimmunity" and own:
                     v["ccimmune"] = max(v["ccimmune"], sec)
                 elif k == "removeactiveeffects":
                     cat = (ch.get("@category") or "").lower()
-                    if enemy and cat in ("buff", "buff_damageshield", "heal", "movementbuff", "invisibility"):
-                        v["purge"] += 1
+                    if enemy and cat in ("buff", "buff_damageshield", "heal", "movementbuff"):
+                        v["purge"] += m
                     elif t in ("self", "all") and cat in ("crowdcontrol", "debuff"):
                         v["cleanse"] += 1
+                sub = "enemy" if (enemy or (ch.get("@applyeffecttarget") or "").lower() == "enemy") else ctx
+                sub_m, sub_own, sub_win = mult, own_mult, window
+                radius = core.num(ch.get("@auraradius")) or 0
+                if k in ("aura",) and 0 < radius < self.CLOSE_RADIUS:
+                    sub_m = mult * self.REACH
+                if k == "applyeffectoneventactive" and sub != "enemy":
+                    # stacking procs (Fury: +8% per hit taken, 7 charges): about half the charges are up on average,
+                    # and the stacks live only as long as the parent effect window
+                    sub_own = own_mult * max(1.0, min(core.num(ch.get("@count")) or 1, 8) * 0.5)
+                    sub_win = sec or window
                 for a in ("@spell", "@effect"):
                     ref = ch.get(a)
                     if ref and ref != "none":
-                        self.spell(ref, depth + 1)
-                self.walk(ch, depth + 1)
+                        self.spell(ref, depth + 1, sub, sub_m, sub_own, sub_win)
+                self.walk(ch, depth + 1, sub, sub_m, sub_own, sub_win)
 
 
 @functools.lru_cache(maxsize=None)
@@ -172,6 +234,9 @@ def pvp_spell(sid):
     d = combat.spell_json(sid)
     if not d:
         return None
+    if d.get("@usableincombat") == "false":  # out-of-combat spells contribute nothing in a fight
+        return {"dmg": 0.0, "cycle": max(core.num(d.get("@recastdelay")) or 1.0, combat.GCD), "aoe": False, "types": {}, "shield": 0.0,
+                "heal": 0.0, "lifesteal": 0.0}
     w = PvpWalk()
     w.spell(sid)
     p = combat.spell_profile(sid, "players") or {"dmg": 0.0, "cycle": core.num(d.get("@recastdelay")) or 1.0, "aoe": False, "types": {}}
@@ -193,7 +258,11 @@ def pvp_value(sid):
     return (min(p["dmg"] / c, combat.MAX_SPELL_DPS) * 3 + per(p.get("cc_hard", 0), CC_CYCLE) * 25 + per(p.get("root", 0), CC_CYCLE) * 8
             + per(p.get("slow", 0)) * 4 + per(min(p.get("dash", 0), 1), ESCAPE_CYCLE) * 10 + per(p.get("invuln", 0), ESCAPE_CYCLE) * 20
             + per(p.get("invis", 0), ESCAPE_CYCLE) * 4 + per(p.get("shield", 0) + p.get("heal", 0)) / 15
-            + per(p.get("purge", 0)) * 15 + per(p.get("cleanse", 0)) * 15 + per(p.get("ccimmune", 0), ESCAPE_CYCLE) * 10)
+            + per(p.get("purge", 0)) * 15 + per(p.get("cleanse", 0)) * 15 + per(p.get("ccimmune", 0), ESCAPE_CYCLE) * 10
+            + per(p.get("dr_p", 0) + p.get("dr_m", 0)) * 10 + per(p.get("reflect", 0)) * 15
+            + per(p.get("dmg_p", 0) + p.get("dmg_m", 0)) * 8 + per(p.get("weaken_p", 0) + p.get("weaken_m", 0)) * 8
+            + per(p.get("aspd", 0)) * 4 + per(p.get("hpbuff", 0)) * 10 + per(p.get("cdr", 0)) * 6
+            + (p.get("drpk_p", 0) + p.get("drpk_m", 0)) * 10 + p.get("reflectpk", 0) * 20)
 
 
 def pick_pvp_spells(item_id):
@@ -203,6 +272,115 @@ def pick_pvp_spells(item_id):
         return []
     kit = combat.weapon_spells(base["base_id"])
     return [max(kit[s], key=lambda o: pvp_value(o[0]))[0] for s in ("1", "2", "3") if kit.get(s)]
+
+
+# ------------------------------------------------------------------ passives, food, cape procs
+CONST_KEYS = {"bonusdefensevsplayers": "pdr", "attackspeedbonus": "paspd", "crowdcontrolresistance": "pccres",
+              "hitpointsmaxbonus": "php", "magiccooldownreduction": "pcdr"}
+
+
+@functools.lru_cache(maxsize=None)
+def const_buffs(sid):
+    """Always-on modifiers of a passive spell ('buff' nodes) or a long food buff ('buffovertime' ≥ 10 min): {pdr, pdmg_p, pdmg_m,
+    paspd, pccres, php} (fractions)."""
+    d = combat.spell_json(sid)
+    out = defaultdict(float)
+    if not d:
+        return {}
+    nodes = combat._aslist(d.get("buff"))
+    nodes += [b for b in combat._aslist(d.get("buffovertime")) if (core.num(b.get("@time")) or 0) >= 600
+              and (b.get("@target") or "self").lower() in ("self", "")]
+    for b in nodes:
+        typ, val = b.get("@type"), core.num(b.get("@value")) or 0
+        if typ in PvpWalk.DMG_TYPES:
+            out["pdmg_" + PvpWalk.DMG_TYPES[typ]] += val / 2
+        elif typ == "bonusdefensevsplayers":
+            out["pdr"] = 1 - (1 - out.get("pdr", 0)) * (1 - defense_dr(val))
+        elif typ in CONST_KEYS and (typ != "hitpointsmaxbonus" or val <= 1):
+            out[CONST_KEYS[typ]] += val
+    return dict(out)
+
+
+def passive_value(sid):
+    c = const_buffs(sid)
+    proc = cape_proc(sid)
+    return (c.get("pdr", 0) * 400 + (c.get("pdmg_p", 0) + c.get("pdmg_m", 0)) * 150 + c.get("paspd", 0) * 150
+            + c.get("pccres", 0) * 50 + c.get("php", 0) * 300 + c.get("pcdr", 0) * 200 + (pvp_value_cycle(*proc[:2]) if proc else 0))
+
+
+def _cape_cooldown(sid, depth=0, seen=None):
+    seen = seen if seen is not None else set()
+    d = combat.spell_json(sid)
+    if not d or sid in seen or depth > 5:
+        return None
+    seen.add(sid)
+    if d.get("@category") == "cape_cooldown":
+        return max((core.num(x.get("@time")) or 0 for x in combat._aslist(d.get("dummy"))), default=0) or None
+    for node in _refs(d):
+        cd = _cape_cooldown(node, depth + 1, seen)
+        if cd:
+            return cd
+    return None
+
+
+def _refs(n):
+    out = []
+    if isinstance(n, dict):
+        for k, v in n.items():
+            if k in ("@spell", "@effect") and isinstance(v, str) and v != "none":
+                out.append(v)
+            elif isinstance(v, (dict, list)):
+                out += _refs(v)
+    elif isinstance(n, list):
+        for x in n:
+            out += _refs(x)
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def cape_proc(sid):
+    """(proc spell, cycle s, resets potion) of an on-event passive with an internal cooldown (capes), else None."""
+    d = combat.spell_json(sid)
+    ev = combat._aslist((d or {}).get("applyeffectoneventpassive"))
+    if not ev:
+        return None
+    proc = ev[0].get("@spell")
+    cd = _cape_cooldown(proc) if proc else None
+    if not proc or not cd:
+        return None
+    resets = '"resetcooldowns"' in json.dumps(combat.spell_json(proc) or {}) and '"potion"' in json.dumps(combat.spell_json(proc) or {})
+    return proc, max(cd, 1.0), resets
+
+
+def pvp_value_cycle(sid, cycle):
+    p = pvp_spell(sid)
+    if not p:
+        return 0.0
+    return pvp_value(sid) * p["cycle"] / max(cycle, 1.0)
+
+
+def potion_damage(sid):
+    """Damage of a thrown potion against an unmounted player: (amount, ignores armor). Potions carry separate damage nodes for
+    mobs, players and mounted players, and don't scale with item power."""
+    d = combat.spell_json(sid) or {}
+    best = None
+    for k in ("attributechangeovertime", "directattributechange"):
+        for n in combat._aslist(d.get(k)):
+            if n.get("@attribute") != "health" or (core.num(n.get("@change")) or 0) >= 0 or n.get("@target") != "enemyplayers":
+                continue
+            amount = -core.num(n["@change"]) * (min(core.num(n.get("@count")) or 1, combat.MAX_PULSES) if k.endswith("overtime") else 1)
+            unmounted = "mountbuff" in json.dumps(n.get("not") or {})  # the unmounted, open-world value (largest such node)
+            if best is None or (unmounted and (not best[2] or amount > best[0])):
+                best = (amount, n.get("@ignorearmor") == "true", unmounted)
+    return best[:2] if best else (0.0, False)
+
+
+def pick_armor_spells(item_id):
+    """(active, passive) for a head/armor/shoes item without selected spells: best by PvP value."""
+    actives, passives = gearcheck._slot_spells(item_id)
+    act = max(actives[0], key=lambda o: pvp_value(o[0]))[0] if actives and actives[0] else None
+    pas = max(passives, key=lambda o: passive_value(o[0]))[0] if passives else None
+    return act, pas
 
 
 # ------------------------------------------------------------------ players
@@ -218,6 +396,15 @@ def build_pvp_player(lo, ip_spec=None, rules=None, intents=None):
     weapon = next((e for e in entries if e["row"]["slot"] == "mainhand" and not e["inventory"]), None)
     if weapon and not weapon["active"]:
         weapon["active"], weapon["auto_slots"] = pick_pvp_spells(weapon["id"]), ["1", "2", "3"]
+    for e in entries:  # armor pieces without selected spells: the game's choice is unknown, pick the best for PvP
+        if e["inventory"] or e["row"]["slot"] not in ("head", "armor", "shoes"):
+            continue
+        if not e["active"] or not e["passive"]:
+            act, pas = pick_armor_spells(e["id"])
+            if not e["active"] and act:
+                e["active"], e["auto_slots"] = [act], ["armor"]
+            if not e["passive"] and pas:
+                e["passive"] = [pas]
     avg, rows = gearcheck.loadout_ip(entries, ip_spec.get("spec_ip", 0), ip_spec.get("weapon_ip"),
                                      ip_spec.get("slot_ip") or raw.get("slot_ip"), ip_spec.get("avg_ip") or raw.get("avg_ip"))
     eff_rows = [[r[0], effective_ip(r[1], rules) if rules else r[1], *r[2:]] for r in rows]
@@ -227,41 +414,82 @@ def build_pvp_player(lo, ip_spec=None, rules=None, intents=None):
     wip = next((r[1] for r in eff_rows if r[0] == "mainhand"), eff_avg)
     k = {"burst": 0.0, "dps": 0.0, "cc30": 0.0, "root30": 0.0, "slow30": 0.0, "dash30": 0.0, "speed30": 0.0, "invis30": 0.0,
          "invuln30": 0.0, "ccimmune30": 0.0, "sustain30": 0.0, "resist30": 0.0, "purge": 0, "cleanse": 0, "antiheal": 0.0,
-         "shred30": 0.0, "lifesteal": 0.0}
+         "shred30": 0.0, "lifesteal": 0.0, "aa": 0.0, "dr_p30": 0.0, "dr_m30": 0.0, "dmg_p30": 0.0, "dmg_m30": 0.0,
+         "weaken_p30": 0.0, "weaken_m30": 0.0, "aspd30": 0.0, "hpbuff30": 0.0, "reflect30": 0.0, "drpk_p": 0.0, "drpk_m": 0.0,
+         "reflectpk": 0.0, "ccres30": 0.0, "cdr30": 0.0, "pcdr": 0.0, "pot_burst": 0.0, "pot_true": 0.0, "pdr": 0.0, "pdmg_p": 0.0, "pdmg_m": 0.0, "paspd": 0.0, "php": 0.0, "pccres": 0.0}
     types = Counter()
     spells = []
     if weapon:
         aa = combat._autoattack_dps(weapon["id"])
         k["burst"] += aa * 3
         k["dps"] += aa
+        k["aa"] = aa
         types["physical"] += aa
+    casts = []  # (slot, spell, profile)
+    potion_uses = 1
     for e in entries:
-        if e["inventory"] or e["row"]["slot"] not in COMBAT_SPELL_SLOTS:
+        if e["inventory"]:
             continue
-        for sid in e["active"]:
-            p = pvp_spell(sid)
-            if not p:
-                continue
-            spells.append((e["row"]["slot"], sid))
-            if p["cycle"] <= 30:
-                k["burst"] += p["dmg"]
-            sp_dps = min(p["dmg"] / p["cycle"], combat.MAX_SPELL_DPS)
-            k["dps"] += sp_dps
-            for t, share in p["types"].items():
-                types[t] += sp_dps * share
-            for src, dst, floor in (("cc_hard", "cc30", CC_CYCLE), ("root", "root30", CC_CYCLE), ("slow", "slow30", 0),
-                                    ("dash", "dash30", ESCAPE_CYCLE), ("speed", "speed30", ESCAPE_CYCLE), ("invis", "invis30", ESCAPE_CYCLE),
-                                    ("invuln", "invuln30", ESCAPE_CYCLE), ("ccimmune", "ccimmune30", ESCAPE_CYCLE),
-                                    ("resist", "resist30", 0), ("shred", "shred30", 0)):
-                k[dst] += min(p.get(src, 0), 1 if src == "dash" else 1e9) * 30 / max(p["cycle"], floor)
-            k["sustain30"] += (p["shield"] + p["heal"]) * 30 / p["cycle"]
-            k["purge"] += p.get("purge", 0) > 0
-            k["cleanse"] += p.get("cleanse", 0) > 0
-            k["antiheal"] = max(k["antiheal"], p.get("antiheal", 0))
-            k["lifesteal"] += p["lifesteal"]
-    for e in entries:  # potions / food (lifesteal, cleanse, heal, invisibility)
+        sl = e["row"]["slot"]
+        if sl in COMBAT_SPELL_SLOTS:
+            casts += [(sl, sid, pvp_spell(sid)) for sid in e["active"]]
+        for sid in (e["passive"] if sl in COMBAT_SPELL_SLOTS else []) + \
+                [r["spell_id"] for r in core.q("SELECT spell_id FROM item_spells WHERE item_id=?", e["row"]["base_id"])
+                 if sl == "cape"]:
+            for ck, cv in const_buffs(sid).items():
+                k[ck] += cv
+            proc = cape_proc(sid)
+            if proc and pvp_spell(proc[0]):
+                casts.append((sl, proc[0], dict(pvp_spell(proc[0]), cycle=proc[1])))
+                potion_uses += proc[2]
+            if sl in COMBAT_SPELL_SLOTS or proc:
+                spells.append((sl, sid))
+    for e in entries:  # potions: one use per fight (two with a potion-cooldown reset), food: always-on buffs
         cs = core.item_json(e["id"]).get("@consumespell")
-        if cs and (e["row"]["slot"] in ("food", "potion") or e["inventory"]):
+        if not cs or e["inventory"]:
+            continue
+        if e["row"]["slot"] == "potion" and pvp_spell(cs):
+            dmg, true_dmg = potion_damage(cs)
+            k["pot_true" if true_dmg else "pot_burst"] += dmg * potion_uses  # fixed damage: no IP scaling
+            casts.append(("potion", cs, dict(pvp_spell(cs), cycle=30.0 / potion_uses, dmg=0.0)))
+        elif e["row"]["slot"] == "food":
+            for ck, cv in const_buffs(cs).items():
+                k[ck] += cv
+    # Cooldown Rate (passives, food, sprint buffs): spells come back 1/(1+rate) faster; averaged over the casts' own uptime
+    k["cdr30"] = sum((p.get("cdr", 0) * 30 / p["cycle"]) for _, _, p in casts if p)
+    rate = 1 + k["pcdr"] + k["cdr30"] / 30
+    for slot, sid, p in casts:
+        if not p:
+            continue
+        if slot not in ("potion", "cape") and p["cycle"] > combat.GCD:
+            p = dict(p, cycle=max(p["cycle"] / rate, combat.GCD))
+        if slot not in ("potion", "cape"):  # cape procs are listed under the cape passive
+            spells.append((slot, sid))
+        if p["cycle"] <= 30:
+            k["burst"] += p["dmg"]
+        sp_dps = min(p["dmg"] / p["cycle"], combat.MAX_SPELL_DPS)
+        k["dps"] += sp_dps
+        for t, share in p["types"].items():
+            types[t] += sp_dps * share
+        for src, dst, floor in (("cc_hard", "cc30", CC_CYCLE), ("root", "root30", CC_CYCLE), ("slow", "slow30", 0),
+                                ("dash", "dash30", ESCAPE_CYCLE), ("speed", "speed30", ESCAPE_CYCLE), ("invis", "invis30", ESCAPE_CYCLE),
+                                ("invuln", "invuln30", ESCAPE_CYCLE), ("ccimmune", "ccimmune30", ESCAPE_CYCLE),
+                                ("resist", "resist30", 0), ("shred", "shred30", 0), ("dr_p", "dr_p30", 0), ("dr_m", "dr_m30", 0),
+                                ("dmg_p", "dmg_p30", 0), ("dmg_m", "dmg_m30", 0), ("weaken_p", "weaken_p30", 0),
+                                ("weaken_m", "weaken_m30", 0), ("aspd", "aspd30", 0), ("hpbuff", "hpbuff30", 0),
+                                ("reflect", "reflect30", 0)):
+            k[dst] += min(p.get(src, 0), 1 if src == "dash" else 1e9) * 30 / max(p["cycle"], floor)
+        if p["cycle"] <= 45:  # defensive cooldowns short enough to be up for the opponent's burst
+            for pk in ("drpk_p", "drpk_m", "reflectpk"):
+                k[pk] = max(k[pk], p.get(pk, 0))
+        k["sustain30"] += (p["shield"] + p["heal"]) * 30 / p["cycle"]
+        k["purge"] += p.get("purge", 0) > 0
+        k["cleanse"] += p.get("cleanse", 0) > 0
+        k["antiheal"] = max(k["antiheal"], p.get("antiheal", 0))
+        k["lifesteal"] += p["lifesteal"]
+    for e in entries:  # food / carried consumables (lifesteal, cleanse, heal, invisibility); the potion slot is a cast above
+        cs = core.item_json(e["id"]).get("@consumespell")
+        if cs and (e["row"]["slot"] == "food" or e["inventory"]):
             p = pvp_spell(cs)
             if p:
                 k["sustain30"] += (p["shield"] + p["heal"]) * min(30 / max(p["cycle"], 30), 1)
@@ -280,34 +508,133 @@ def build_pvp_player(lo, ip_spec=None, rules=None, intents=None):
             "scale": combat.PER_IP ** ((wip - 1000) / 100) * (1 + bonus)}
 
 
+DR_CAP = 0.6        # damage reduction from Defense / % resistance buffs, passives and timed cooldowns together
+TIMING = 0.5        # share of the opponent's burst a timed defensive / reflect cooldown catches (player skill not modelled)
+KITE_BASE = 0.6     # melee vs ranged: share of the sustained phase the melee player is in reach — ASSUMPTION, raised by own
+                    # gap closers / speed / CC, lowered by the ranged player's slows, roots and escapes (clamped 0.35–0.95)
+
+
+def melee_uptime(a, b):
+    """Share of the sustained fight a melee `a` can hit a ranged `b` (1.0 unless a is melee and b ranged)."""
+    if a["ranged"] or not b["ranged"]:
+        return 1.0
+    ka, kb = a["kit"], b["kit"]
+    up = KITE_BASE + 0.06 * ka["dash30"] + 0.03 * ka["speed30"] + 0.02 * (ka["cc30"] + ka["root30"]) + 0.01 * ka["slow30"] \
+        - 0.03 * kb["dash30"] - 0.02 * kb["speed30"] - 0.03 * kb["root30"] - 0.01 * kb["slow30"] - 0.01 * kb["invis30"]
+    return min(max(up, 0.35), 0.95)
+
+
 def _mit(attacker, target, shred30=0.0):
-    st = target["stats"]
-    arm = max(st["physicalarmor"] - shred30 / 30, 0)
-    mres = max(st["magicresistance"] - shred30 / 30, 0)
+    st, kt = target["stats"], target["kit"]
+    extra = kt["resist30"] / 30  # flat armor / magic resistance buffs, averaged over 30 s
+    arm = max(st["physicalarmor"] + extra - shred30 / 30, 0)
+    mres = max(st["magicresistance"] + extra - shred30 / 30, 0)
     m = attacker["mix"].get("physical", 0) * combat.mitigation(arm) + attacker["mix"].get("magic", 0) * combat.mitigation(mres)
-    return m * (1 - min(st.get("bonusdefensevsplayers", 0) or 0, 0.5))
+    return m * (1 - defense_dr(st.get("bonusdefensevsplayers", 0) or 0))
+
+
+def _mods(a, b, burst=False):
+    """Damage multiplier for a hitting b: a's damage buffs/passives × (1 − b's damage reduction) × (1 − b's weakening of a).
+    Sustained phase uses 30-s averages; the burst phase assumes b times its shortest defensive cooldown (TIMING)."""
+    ka, kb = a["kit"], b["kit"]
+    out = 0.0
+    for t, share in a["mix"].items():
+        x = "m" if t == "magic" else "p"
+        dmg = 1 + ka["pdmg_" + x] + ka["dmg_" + x + "30"] / 30
+        dr = kb["pdr"] + kb["dr_" + x + "30"] / 30
+        if burst:
+            dr = max(dr, kb["pdr"] + TIMING * kb["drpk_" + x])
+        weak = min(kb["weaken_" + x + "30"] / 30, 0.5)
+        out += share * dmg * (1 - min(dr, DR_CAP)) * (1 - weak)
+    return out
+
+
+def _hit(a, b):
+    """(burst, sustained DPS) a deals to b after mitigation, buffs, defenses and b's CC / immunity windows on a."""
+    ka, kb = a["kit"], b["kit"]
+    m = _mit(a, b, ka["shred30"])
+    burst = (ka["burst"] * a["scale"] * m + ka["pot_burst"] * m + ka["pot_true"]) * _mods(a, b, burst=True)
+    dps = (ka["dps"] + ka["aa"] * (ka["aspd30"] / 30 + ka["paspd"])) * a["scale"] * m * _mods(a, b)
+    cc_on_a = min(kb["cc30"] / 30 * (0.5 if ka["cleanse"] else 1) * max(0.0, 1 - ka["ccimmune30"] / 30)
+                  * max(0.0, 1 - defense_dr(ka["pccres"]) - ka["ccres30"] / 30), CC_CAP)
+    dps *= (1 - cc_on_a) * max(0.0, 1 - min(kb["invuln30"] / 30, 0.4)) * melee_uptime(a, b)
+    return burst, dps
 
 
 def _ttk(a, b):
-    """Seconds for `a` to kill `b`: burst, then sustained damage minus b's sustain; b's CC on a and b's immunity windows."""
+    """Seconds for `a` to kill `b`: burst, then sustained damage minus b's sustain; b's CC on a and b's immunity windows;
+    damage b deals that a reflects back (Retaliate, Frost Shield…: timed on b's burst, averaged afterwards)."""
     ka, kb = a["kit"], b["kit"]
-    m = _mit(a, b, ka["shred30"])
-    burst = ka["burst"] * a["scale"] * m
-    dps = ka["dps"] * a["scale"] * m
-    cc_on_a = min(kb["cc30"] / 30 * (0.5 if ka["cleanse"] else 1) * max(0.0, 1 - ka["ccimmune30"] / 30), CC_CAP)
-    dps *= (1 - cc_on_a) * max(0.0, 1 - min(kb["invuln30"] / 30, 0.4))
+    burst, dps = _hit(a, b)
+    b_burst, b_dps = _hit(b, a)
+    back = combat.mitigation(b["stats"]["magicresistance"])  # reflected damage arrives as magic damage
+    burst += b_burst * TIMING * min(ka["reflectpk"], 0.85) * back
+    dps += b_dps * min(ka["reflect30"] / 30, 0.85) * back
     heal_mult = 1 - min(ka["antiheal"], 0.5)
     sustain = (kb["sustain30"] / 30) * b["scale"] / max(b["ap"], 0.01) * heal_mult + kb["lifesteal"] * kb["dps"] * b["scale"] * 0.3
-    sustain += kb["resist30"] / 30 * 0  # resist buffs act through mitigation below
-    ehp = b["stats"]["hp"] * (1 + kb["resist30"] / 30 / 200)
+    ehp = b["stats"]["hp"] * (1 + kb["hpbuff30"] / 30 + kb["php"])
     net = max(dps - sustain, 0.15 * dps, 1e-6)
     return OPENING + max(ehp - burst, 0) / net
+
+
+CAL_PATH = os.path.join(core.ROOT, "knowledge", "pvp_calibration.json")
+KIT_FEATURES = ("logttk", "burst", "cc", "escape", "ranged", "hp")
+FAMILY_SLOTS = ("mainhand", "offhand", "head", "armor", "shoes", "cape")
+
+
+@functools.lru_cache(maxsize=1)
+def calibration_model():
+    """Logistic weights fitted on killboard fights by pvp_backtest(fit=True), or None."""
+    try:
+        with open(CAL_PATH, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _families(p):
+    by = {e["row"]["slot"]: advisor._family(e["id"]) for e in p["entries"] if not e["inventory"]}
+    return {s_: by.get(s_) or "none" for s_ in FAMILY_SLOTS}
+
+
+def pair_features(a, b, t_ab=None, t_ba=None):
+    """Antisymmetric features of a vs b (f(b, a) = −f(a, b)): effective IP gap (100 IP = 1), the duel simulation's kit
+    signals (TTK ratio, burst share of HP, CC, escapes, ranged, HP; clipped to ±2) and the item family in every slot
+    (slot:family = +1 for a, −1 for b) — the item effects are learned from killboard outcomes."""
+    t_ab = t_ab if t_ab is not None else _ttk(a, b)
+    t_ba = t_ba if t_ba is not None else _ttk(b, a)
+    ka, kb = a["kit"], b["kit"]
+    ba, bb = _hit(a, b)[0], _hit(b, a)[0]
+    esc = lambda k: k["dash30"] + k["invis30"] / 3 + k["invuln30"]
+    clip = lambda x: max(min(x, 2.0), -2.0)
+    f = {"dip": (a["eff_avg"] - b["eff_avg"]) / 100, "logttk": clip(math.log(max(t_ba, 0.1) / max(t_ab, 0.1))),
+         "burst": clip(min(ba / b["stats"]["hp"], 2) - min(bb / a["stats"]["hp"], 2)),
+         "cc": clip((ka["cc30"] + ka["root30"] - kb["cc30"] - kb["root30"]) / 10), "escape": clip((esc(ka) - esc(kb)) / 10),
+         "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)}
+    fa, fb = _families(a), _families(b)
+    for s_ in FAMILY_SLOTS:
+        if fa[s_] != fb[s_]:
+            f[f"{s_}:{fa[s_]}"] = f.get(f"{s_}:{fa[s_]}", 0) + 1
+            f[f"{s_}:{fb[s_]}"] = f.get(f"{s_}:{fb[s_]}", 0) - 1
+    return f
+
+
+def win_probability(a, b, t_ab=None, t_ba=None):
+    """P(a beats b): calibrated on killboard fights when knowledge/pvp_calibration.json exists, else the raw TTK model."""
+    t_ab = t_ab if t_ab is not None else _ttk(a, b)
+    t_ba = t_ba if t_ba is not None else _ttk(b, a)
+    cal = calibration_model()
+    if not cal:
+        return 1 / (1 + (t_ab / t_ba) ** DUEL_K)
+    w = cal["weights"]
+    z = sum(w.get(k, 0.0) * v for k, v in pair_features(a, b, t_ab, t_ba).items())
+    return 1 / (1 + math.exp(-max(min(z, 30), -30)))
 
 
 def duel(a, b):
     """{'win', 'lose', 'disengage', 'ttk_ab', 'ttk_ba'} for player a against player b (model)."""
     t_ab, t_ba = _ttk(a, b), _ttk(b, a)
-    p = 1 / (1 + (t_ab / t_ba) ** DUEL_K)
+    p = win_probability(a, b, t_ab, t_ba)
     loser, winner = (b, a) if p >= 0.5 else (a, b)
     lk, wk = loser["kit"], winner["kit"]
     esc = 0.1 + 0.08 * lk["dash30"] + 0.04 * lk["speed30"] + 0.02 * lk["invis30"] + 0.02 * lk["invuln30"] \
@@ -316,6 +643,190 @@ def duel(a, b):
     if p >= 0.5:  # b may get away
         return {"win": p * (1 - esc), "lose": 1 - p, "disengage": p * esc, "ttk_ab": t_ab, "ttk_ba": t_ba}
     return {"win": p, "lose": (1 - p) * (1 - esc), "disengage": (1 - p) * esc, "ttk_ab": t_ab, "ttk_ba": t_ba}
+
+
+# ------------------------------------------------------------------ backtest / calibration on the killboard
+KB_SLOTS = ("MainHand", "OffHand", "Head", "Armor", "Shoes", "Cape", "Potion", "Food")
+
+
+def _kb_loadout(p):
+    items = []
+    for sl in KB_SLOTS:
+        it = (p.get("Equipment") or {}).get(sl) or {}
+        t = it.get("Type")
+        if t and q1("SELECT 1 FROM items WHERE id=?", t):
+            e = {"item": t, "quality": it.get("Quality") or 1}
+            if it.get("ActiveSpells"):
+                e["activeSpells"] = it["ActiveSpells"]
+            if it.get("PassiveSpells"):
+                e["passiveSpells"] = it["PassiveSpells"]
+            items.append(e)
+    return {"name": p.get("Name") or "?", "equipment": items}
+
+
+def _is_fight(p):
+    eq = p.get("Equipment") or {}
+    mh = (eq.get("MainHand") or {}).get("Type") or ""
+    return mh and "TOOL" not in mh and "GATHERER" not in json.dumps(eq)
+
+
+KB_STORE = os.path.join(core.ROOT, "knowledge", "killboard_fights.jsonl.gz")
+
+
+def _compact_side(p):
+    eq = {sl: [it["Type"], it.get("Quality") or 1] for sl, it in (p.get("Equipment") or {}).items() if sl in KB_SLOTS and it and it.get("Type")}
+    return {"ip": p.get("AverageItemPower") or 0, "eq": eq}
+
+
+def _expand_side(c):
+    return {"Name": "?", "AverageItemPower": c["ip"], "Equipment": {sl: {"Type": t, "Quality": q_} for sl, (t, q_) in c["eq"].items()}}
+
+
+def kb_store():
+    """{event id: compact solo fight} accumulated by killboard_collect."""
+    import gzip
+    out = {}
+    try:
+        with gzip.open(KB_STORE, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                r = json.loads(line)
+                out[r["id"]] = r
+    except OSError:
+        pass
+    return out
+
+
+def killboard_collect(servers="europe,west,east", pages=20):
+    """Append new solo kills (armed, non-gathering, both sides' gear + IP) from the killboard to
+    knowledge/killboard_fights.jsonl.gz — the training data of the PvP calibration. Run it regularly: the public feed only
+    holds the last ~1000 events per server (≈ 1 hour)."""
+    import gzip
+    store = kb_store()
+    before = len(store)
+    srv = tuple(x.strip() for x in str(servers).split(",") if x.strip())
+    per = Counter()
+    for sv in srv:
+        advisor._kb_cache.clear()
+        for e in advisor._events(sv, pages):
+            if e["EventId"] in store or (e.get("numberOfParticipants") or len(e.get("Participants") or [])) != 1:
+                continue
+            K, V = e["Killer"], e["Victim"]
+            if not (_is_fight(K) and _is_fight(V)):
+                continue
+            store[e["EventId"]] = {"id": e["EventId"], "t": e.get("TimeStamp", "")[:19], "srv": sv, "k": _compact_side(K), "v": _compact_side(V)}
+            per[sv] += 1
+    with gzip.open(KB_STORE, "wt", encoding="utf-8") as fh:
+        for r in sorted(store.values(), key=lambda r: r["t"]):
+            fh.write(json.dumps(r, separators=(",", ":")) + "\n")
+    ts = sorted(r["t"] for r in store.values())
+    return (f"## Killboard collection\nAdded **{len(store) - before}** solo fights ("
+            + ", ".join(f"{k} {v}" for k, v in per.items()) + f"); stored **{len(store)}** fights"
+            + (f", {ts[0]} → {ts[-1]} UTC" if ts else "") + ".\nRe-fit the calibration with `pvp_backtest fit=true`.")
+
+
+def kb_pairs(fights):
+    """[(timestamp, features of killer vs victim, raw p(killer), IP gap)] from stored compact fights."""
+    out = []
+    for r in fights:
+        K, V = _expand_side(r["k"]), _expand_side(r["v"])
+        try:
+            a = build_pvp_player(_kb_loadout(K), {"avg_ip": K["AverageItemPower"]})
+            b = build_pvp_player(_kb_loadout(V), {"avg_ip": V["AverageItemPower"]})
+            t_ab, t_ba = _ttk(a, b), _ttk(b, a)
+        except (AOError, KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        out.append((r["t"], pair_features(a, b, t_ab, t_ba), 1 / (1 + (t_ab / t_ba) ** DUEL_K), a["eff_avg"] - b["eff_avg"]))
+    return out
+
+
+L2 = {"dense": 0.001, "kit": 0.5, "family": 0.03}  # chosen by 5-fold cross-validation on 1399 fights (2026-10-19)
+
+
+def _fit_logistic(rows, keep=None, iters=300, lr=0.5):
+    """L2 logistic regression without intercept on antisymmetric features (label: a = the killer). keep = feature filter."""
+    data = [{k: v for k, v in f.items() if keep is None or keep(k)} for f in rows]
+    w = defaultdict(float)
+    reg = lambda k: L2["family"] if ":" in k else (L2["kit"] if k in KIT_FEATURES else L2["dense"])
+    for _ in range(iters):
+        g = defaultdict(float)
+        for x in data:
+            pr = 1 / (1 + math.exp(-max(min(sum(w[k] * v for k, v in x.items()), 30), -30)))
+            for k, v in x.items():
+                g[k] += (1 - pr) * v
+        for k in set(g) | set(w):
+            w[k] += lr * (g[k] / len(data) - reg(k) * w[k])
+    return dict(w)
+
+
+def _predict(w, f):
+    return 1 / (1 + math.exp(-max(min(sum(w.get(k, 0.0) * v for k, v in f.items()), 30), -30)))
+
+
+def _metrics(ps):
+    """Accuracy, log-loss, calibration bins for predicted P(killer wins)."""
+    ps = [min(max(p, 1e-3), 1 - 1e-3) for p in ps]
+    bins = defaultdict(lambda: [0, 0])
+    for p in ps:
+        for q, won in ((p, 1), (1 - p, 0)):
+            b_ = min(int(q * 5), 4)
+            bins[b_][0] += 1
+            bins[b_][1] += won
+    return (sum(p > 0.5 for p in ps) / len(ps), -sum(math.log(p) for p in ps) / len(ps), {b_: v for b_, v in sorted(bins.items())})
+
+
+def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3, collect=True):
+    """Backtest the duel model on killboard solo kills (killer vs victim with their real gear and IP): accuracy, log-loss and
+    calibration on a held-out split for IP-only, the raw TTK model and the calibrated feature model; fit=True refits the
+    calibration on all fights and saves it to knowledge/pvp_calibration.json (used by duel / pvp_check / pvp_tune)."""
+    srv = tuple(x.strip() for x in str(servers).split(",") if x.strip())
+    if collect:
+        killboard_collect(servers, pages)
+    rows = sorted(kb_pairs(kb_store().values()), key=lambda r: r[0])
+    if len(rows) < 100:
+        raise AOError(f"Only {len(rows)} usable fights — run killboard_collect a few times")
+    cut = int(len(rows) * (1 - test_share))  # time split: the newest fights are the test set (no look-ahead)
+    train, test = rows[:cut], rows[cut:]
+    o = [f"## PvP model backtest — {len(rows)} stored solo kills ({rows[0][0]} → {rows[-1][0]} UTC); train {len(train)} / "
+         f"test {len(test)} (newest {test_share:.0%})", ""]
+    tr = [r[1] for r in train]
+    w_ip = _fit_logistic(tr, lambda k: k == "dip")
+    w_kit = _fit_logistic(tr, lambda k: ":" not in k)
+    w_all = _fit_logistic(tr)
+    res = {"IP gap only": [_predict(w_ip, r[1]) for r in test],
+           "raw duel simulation (TTK)": [r[2] for r in test],
+           "IP + simulated kit": [_predict(w_kit, r[1]) for r in test],
+           "IP + kit + items (calibrated)": [_predict(w_all, r[1]) for r in test]}
+    rows_t, cal_txt = [], []
+    for name, ps in res.items():
+        acc, ll, bins = _metrics(ps)
+        conf = [p for p in ps if abs(p - 0.5) >= 0.25]
+        rows_t.append((name, f"{acc:.1%}", f"{ll:.3f}", f"{len(conf)} ({len(conf) / len(ps):.0%}): "
+                       + (f"{sum(p > 0.5 for p in conf) / len(conf):.0%} right" if conf else "—")))
+        cal_txt.append(f"- {name}: " + "; ".join(f"{b_ * 20}–{b_ * 20 + 20}% → {v[1] / v[0]:.0%} (n={v[0]})" for b_, v in bins.items()))
+    o.append(table(rows_t, ["predictor (held-out fights)", "picks the killer", "log-loss (0.693 = coin)", "confident calls (≥75/≤25%)"]))
+    o.append("\n**Calibration** (predicted → observed win share):\n" + "\n".join(cal_txt))
+    o.append("\n**Weights** (train): " + ", ".join(f"{n} {w_all.get(n, 0):+.2f}" for n in ("dip",) + KIT_FEATURES)
+             + " — dip = per 100 effective IP; kit signals clipped to ±2.")
+    fam = sorted(((v, k) for k, v in w_all.items() if ":" in k), reverse=True)
+    if fam:
+        nm = lambda k: f"{k.split(':')[0]} {advisor._fam_name(k.split(':', 1)[1])}"
+        o.append("\n**Items that win more than their IP explains** (log-odds; +0.94 ≈ +100 IP): "
+                 + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[:8])
+                 + "\n**…and less:** " + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[-8:]))
+    if fit:
+        w_final = _fit_logistic([r[1] for r in rows])
+        acc, ll, _ = _metrics(res["IP + kit + items (calibrated)"])
+        cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4}, "n": len(rows),
+               "period": [rows[0][0], rows[-1][0]],
+               "trained": time.strftime("%Y-%m-%d"), "test_accuracy": round(acc, 4), "test_logloss": round(ll, 4)}
+        with open(CAL_PATH, "w", encoding="utf-8") as fh:
+            json.dump(cal, fh, indent=1)
+        calibration_model.cache_clear()
+        o.append(f"\n✅ Saved calibration to `knowledge/pvp_calibration.json` (weights refit on all {len(rows)} fights). "
+                 "duel / pvp_check / pvp_tune now use it.")
+    o.append("\n_Killboard = fights that ended in a death in the open world (no IP cap): ambushes, third parties and fights "
+             "against mobs are mixed in. In capped content the IP weight is applied to the effective IP after the cap._")
+    return "\n".join(o)
 
 
 # ------------------------------------------------------------------ killboard field
@@ -407,7 +918,8 @@ def _player_rows(players, rules):
         k = p["kit"]
         sp = ", ".join(f"{(q1('SELECT name_en FROM spells WHERE id=?', s) or {'name_en': s})['name_en']}" for _, s in p["spells"])
         rows.append((p["name"], f"{p['avg']:.0f} → {p['eff_avg']:.0f}" if rules["cap"] else f"{p['avg']:.0f}",
-                     f"{p['stats']['hp']:,.0f}", f"{k['burst'] * p['scale']:,.0f}", f"{k['dps'] * p['scale']:,.0f}",
+                     f"{p['stats']['hp']:,.0f}", f"{k['burst'] * p['scale'] + k['pot_burst'] + k['pot_true']:,.0f}",
+                     f"{k['dps'] * p['scale']:,.0f}",
                      ", ".join(x for x in (f"hard {k['cc30']:.1f}s" if k["cc30"] else "", f"root {k['root30']:.1f}s" if k["root30"] else "",
                                            f"slow {k['slow30']:.1f}" if k["slow30"] else "") if x) or "—",
                      ", ".join(x for x in (f"{k['dash30']:.1f} dash" if k["dash30"] else "", f"speed {k['speed30']:.1f}" if k["speed30"] else "",
@@ -653,9 +1165,188 @@ def _per_content(spec, keys):
     return out
 
 
-PVP_NOTE = ("_PvP model: burst = one cast of every damaging spell with cooldown ≤30 s + 3 s of auto-attacks; DPS = autos + spells "
-            "over their cooldowns (vs players, spells.json); damage × 1.0918 per +100 effective weapon IP × item damage bonus; "
-            "mitigation 100/(100+armor/mres) and PvP defense bonus; CC on the opponent stops their damage (≤45%, halved by cleanse, "
-            "removed by CC immunity windows); shields/heals/lifesteal offset damage (anti-heal reduces heals); win chance = "
+PVP_NOTE = ("_PvP model: burst = one cast of every damaging spell with cooldown ≤30 s + 3 s of auto-attacks + potion damage; DPS = "
+            "autos + spells over their cooldowns (vs players, spells.json); damage × 1.0918 per +100 effective weapon IP × item damage "
+            "bonus × passive/food/buff damage bonuses; mitigation 100/(100+armor/mres), PvP defense bonus, Defense / % resistance buffs "
+            "(30-s average; a defensive cooldown ≤45 s is assumed timed on half of the opponent's burst), weakening debuffs, reflected "
+            "damage; armor pieces without chosen spells get the best PvP spells; cape procs on their internal cooldown; CC on the opponent "
+            "stops their damage (≤45%, halved by cleanse, removed by CC immunity windows); shields/heals/lifesteal offset damage "
+            "(anti-heal reduces heals); melee vs ranged hits only part of the sustained phase (kiting: 0.6 base, ± dashes / speed / CC of "
+            "both sides); win chance = "
             "1/(1+(TTK_you/TTK_them)^3); the loser escapes with dashes/speed/invisibility minus the winner's slows and CC. "
             "Player skill, positioning and cooldown timing are not modelled — compare builds, don't treat as a guarantee._")
+
+
+# ------------------------------------------------------------------ gear tuning against reference opponents
+# Archetype builds seen on the killboard (T8.3 items; their IP is set with opp_ip). role: ranged / melee.
+REFERENCE_OPPONENTS = {
+    "Dual Swords": ("melee", ["2H_DUALSWORD", "HEAD_LEATHER_SET2", "ARMOR_LEATHER_SET1", "SHOES_LEATHER_SET3", "CAPEITEM_FW_THETFORD"]),
+    "Spear + Torch": ("melee", ["MAIN_SPEAR", "OFF_TORCH", "HEAD_LEATHER_SET1", "ARMOR_LEATHER_FEY", "SHOES_LEATHER_AVALON",
+                                "CAPEITEM_FW_THETFORD"]),
+    "Bear Paws": ("melee", ["2H_DUALAXE_KEEPER", "HEAD_CLOTH_HELL", "ARMOR_LEATHER_SET3", "SHOES_CLOTH_ROYAL", "CAPEITEM_FW_THETFORD"]),
+    "Prowling Staff": ("melee", ["2H_SHAPESHIFTER_SET1", "HEAD_CLOTH_HELL", "ARMOR_PLATE_SET3", "SHOES_LEATHER_SET2", "CAPEITEM_FW_THETFORD"]),
+    "Fire Staff + Tome": ("ranged", ["MAIN_FIRESTAFF", "OFF_BOOK", "HEAD_LEATHER_SET2", "ARMOR_CLOTH_SET2", "SHOES_PLATE_SET3",
+                                     "CAPEITEM_FW_THETFORD"]),
+    "Demonic Staff": ("ranged", ["2H_DEMONICSTAFF", "HEAD_PLATE_AVALON", "ARMOR_LEATHER_FEY", "SHOES_PLATE_ROYAL", "CAPEITEM_FW_THETFORD"]),
+    "Frost Staff + Tome": ("ranged", ["MAIN_FROSTSTAFF", "OFF_BOOK", "HEAD_CLOTH_SET1", "ARMOR_CLOTH_SET3", "SHOES_CLOTH_SET1",
+                                      "CAPEITEM_FW_THETFORD"]),
+    "Cursed Staff + Tome": ("ranged", ["MAIN_CURSEDSTAFF", "OFF_BOOK", "HEAD_CLOTH_SET2", "ARMOR_CLOTH_SET2", "SHOES_CLOTH_SET1",
+                                       "CAPEITEM_FW_THETFORD"]),
+    "Light Crossbow + Mistcaller": ("ranged", ["MAIN_1HCROSSBOW", "OFF_HORN_KEEPER", "HEAD_PLATE_SET3", "ARMOR_CLOTH_SET2",
+                                               "SHOES_PLATE_SET1", "CAPEITEM_FW_THETFORD"]),
+    "Bow": ("ranged", ["2H_BOW", "HEAD_LEATHER_SET3", "ARMOR_LEATHER_SET3", "SHOES_LEATHER_SET2", "CAPEITEM_FW_THETFORD"]),
+    "Warbow": ("ranged", ["2H_WARBOW", "HEAD_LEATHER_SET1", "ARMOR_LEATHER_SET1", "SHOES_LEATHER_SET3", "CAPEITEM_FW_THETFORD"]),
+    "Longbow": ("ranged", ["2H_LONGBOW", "HEAD_LEATHER_SET2", "ARMOR_LEATHER_SET2", "SHOES_LEATHER_SET3", "CAPEITEM_FW_THETFORD"]),
+}
+TUNE_SLOTS = ("weapon", "head", "armor", "shoes", "cape", "potion", "food")
+
+
+def reference_opponents(vs="ranged", opp_ip=1300, rules=None):
+    roles = {"ranged": ("ranged",), "melee": ("melee",), "all": ("ranged", "melee")}.get(vs)
+    if not roles:
+        raise AOError("vs must be ranged, melee or all")
+    out = []
+    for name, (role, fams) in REFERENCE_OPPONENTS.items():
+        if role in roles:
+            lo = {"name": name, "equipment": [{"item": f"T8_{f}@3"} for f in fams]}
+            out.append(build_pvp_player(lo, {"avg_ip": opp_ip}, rules))
+    return out
+
+
+def _slot_candidates(slot, cur):
+    """Alternatives for one slot: [(label, equipment entry or None to drop)]. Gear keeps the current item power."""
+    if slot == "weapon":
+        kit = combat.weapon_spells(q1("SELECT base_id FROM items WHERE id=?", cur["item"])["base_id"])
+        opts = [[o[0] for o in kit.get(s) or []] for s in ("1", "2", "3")]
+        out = []
+        for qs in opts[0] or [None]:
+            for ws in opts[1] or [None]:
+                for es in opts[2] or [None]:
+                    act = [x for x in (qs, ws, es) if x]
+                    out.append((" / ".join(_spell_name(x) for x in act), dict(cur, activeSpells=act)))
+        return out
+    if slot in ("potion", "food"):
+        rows = core.q("SELECT id, base_id, tier, enchant FROM items WHERE slot=? AND id GLOB 'T[0-9]_*' ORDER BY tier DESC, enchant DESC", slot)
+        best = {}
+        for r in rows:
+            best.setdefault(re.sub(r"^T\d_", "", r["base_id"]), r["id"])
+        return [(label(i), dict(cur or {}, item=i)) for i in best.values()]
+    ip = q1("SELECT itempower FROM items WHERE id=?", cur["item"])["itempower"]
+    tier = q1("SELECT tier FROM items WHERE id=?", cur["item"])["tier"]
+    rows = core.q("SELECT id, tier FROM items WHERE slot=? AND itempower=? AND id GLOB 'T[0-9]_*' AND id NOT LIKE '%GATHERER%' "
+                  "AND shopcat NOT IN ('skins', 'vanity')", slot, ip)
+    fams = {}
+    for r in sorted(rows, key=lambda r: abs(r["tier"] - tier)):
+        fams.setdefault(advisor._family(r["id"]), r["id"])
+    out = []
+    for iid in fams.values():
+        base = {k: v for k, v in cur.items() if k not in ("activeSpells", "passiveSpells")}
+        base["item"] = iid
+        if slot == "cape":
+            out.append((label(iid), base))
+            continue
+        actives, passives = gearcheck._slot_spells(iid)
+        for a in (actives[0] if actives else []) or [None]:
+            for p_ in passives or [None]:
+                e = dict(base)
+                if a:
+                    e["activeSpells"] = [a[0]]
+                if p_:
+                    e["passiveSpells"] = [p_[0]]
+                out.append((f"{label(iid)}: {a[1] if a else '—'} / {p_[1] if p_ else '—'}", e))
+    return out
+
+
+def _spell_name(sid):
+    r = q1("SELECT name_en FROM spells WHERE id=?", sid)
+    return r["name_en"] if r and r["name_en"] else sid
+
+
+def _equip_slot(entry):
+    return q1("SELECT slot FROM items WHERE id=?", core.resolve_item(entry["item"]))["slot"]
+
+
+def pvp_tune(loadout, content="corrupted_stalker", vs="ranged", opp_ip=None, ips=None, slots=None, passes=3, top=5):
+    """Coordinate search over the loadout's slots (weapon spells, head, armor, shoes with every active/passive, cape, potion,
+    food) for the best average outcome (win − death) against reference opponents (ranged / melee / all) at opp_ip."""
+    key = resolve_zone(content)
+    rules = zone_rules(key)
+    ip_spec = gearcheck._parse_ips(ips, 1)[0] if ips else {}
+    opp_ip = float(opp_ip or (rules["cap"] * 1.3 if rules["cap"] else 1300))
+    opps_ = reference_opponents(vs, opp_ip, rules)
+    raw = json.loads(json.dumps(gearcheck._raw_loadout(loadout)))
+    eq = {"weapon" if _equip_slot(e) == "mainhand" else _equip_slot(e): dict(e, item=core.resolve_item(e["item"]))
+          for e in raw.get("equipment") or []}
+    want = [s.strip() for s in (slots or ",".join(TUNE_SLOTS)).split(",") if s.strip()]
+    for s_ in want:
+        if s_ not in TUNE_SLOTS:
+            raise AOError(f"Unknown slot {s_!r}: use {', '.join(TUNE_SLOTS)}")
+    ip_avg = ip_spec.get("avg_ip")
+
+    def build(eqd):
+        lo = dict(raw, equipment=list(eqd.values()))
+        spec = dict(ip_spec)
+        if ip_avg:
+            spec["avg_ip"] = ip_avg
+        return build_pvp_player(json.dumps(lo, ensure_ascii=False), spec, rules)
+
+    def evaluate(eqd):
+        me = build(eqd)
+        res = [duel(me, o) for o in opps_]
+        return sum(r["win"] - r["lose"] for r in res) / len(res), res, me
+
+    base_score, base_res, base_me = evaluate(eq)
+    best, best_score = dict(eq), base_score
+    rankings, tried = {}, 0
+    for _ in range(max(1, min(passes, 5))):
+        improved = False
+        for s_ in want:
+            if s_ not in best and s_ not in ("potion", "food"):
+                continue
+            cands = _slot_candidates(s_, best.get(s_) or {})
+            scored = []
+            for name, entry in cands:
+                trial = dict(best)
+                trial[s_] = entry
+                try:
+                    sc = evaluate(trial)[0]
+                except (AOError, KeyError, TypeError, ZeroDivisionError):
+                    continue
+                tried += 1
+                scored.append((sc, name, entry))
+            if not scored:
+                continue
+            scored.sort(key=lambda x: -x[0])
+            rankings[s_] = scored
+            if scored[0][0] > best_score + 1e-6:
+                best[s_], best_score, improved = scored[0][2], scored[0][0], True
+        if not improved:
+            break
+    fin_score, fin_res, fin_me = evaluate(best)
+    o = [f"## PvP gear tuning: “{raw.get('name') or 'loadout'}” → {rules['title']}", "",
+         f"Opponents: {len(opps_)} reference **{vs}** builds at **{opp_ip:.0f} IP** (→ {effective_ip(opp_ip, rules):.0f} after the cap); "
+         f"you: {base_me['avg']:.0f} → {base_me['eff_avg']:.0f} IP. {tried} variants simulated. Score = average (win − death).", ""]
+    rows = []
+    for op, a, b in zip(opps_, base_res, fin_res):
+        rows.append((op["name"], f"{a['win']:.0%} / {a['disengage']:.0%} / {a['lose']:.0%}", f"{b['win']:.0%} / {b['disengage']:.0%} / {b['lose']:.0%}"))
+    rows.append(("**score**", f"{base_score:+.2f}", f"**{fin_score:+.2f}**"))
+    o.append(table(rows, ["opponent", "now: win / disengage / die", "tuned: win / disengage / die"]))
+    changes = []
+    for s_ in want:
+        a, b = eq.get(s_), best.get(s_)
+        if a != b and b:
+            def desc(e):
+                if not e:
+                    return "—"
+                sp = ", ".join(_spell_name(x) for x in (e.get("activeSpells") or []) + (e.get("passiveSpells") or []))
+                return f"{label(e['item'])}" + (f" ({sp})" if sp else "")
+            changes.append((s_, desc(a), desc(b)))
+    o.append("\n### Changes\n" + (table(changes, ["slot", "now", "tuned"]) if changes else "None — the loadout is already the best "
+                                     "the model finds for these slots."))
+    for s_, sc in rankings.items():
+        o.append(f"\n**{s_}** — top {top} (score with the rest tuned): " + "; ".join(f"{n} {v:+.2f}" for v, n, _ in sc[:top]))
+    tuned = dict(raw, name=(raw.get("name") or "loadout") + " tuned", equipment=list(best.values()))
+    o.append("\n### Import\n```json\n" + json.dumps(tuned, ensure_ascii=False, separators=(",", ":")) + "\n```")
+    o.append("\n_Reference opponents are fixed archetypes, not the live killboard; run pvp_check with the tuned set for the field. "
+             "Gear alternatives keep the current item power of each slot; cost them with build_cost._\n" + PVP_NOTE)
+    return "\n".join(o)

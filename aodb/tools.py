@@ -153,6 +153,15 @@ TOOLS = [
                      content=P(S, "green / blue / gold", "green"), tier=P(I, "Tier", 6), stage=P(S, "small / medium / large", "large"),
                      ips=P(S, "In-game IP incl. mastery and max HP"), intents=P(S, "Spell choice in words"),
                      dodge=P(N, "Dodge share", 0.9), dodge_low=P(N, "Pessimistic dodge", 0.5))),
+    dict(name="loadout_export", fn=gearcheck.loadout_export,
+         desc="Write a loadout in the game's import format (JSON, version 1): from an exported loadout and/or a list of items; swap "
+              "items per slot, retier all gear (tier/enchant), set quality and spells (by ID or name, validated against the item). "
+              "Use to hand the user a recommended set ready to import.",
+         params=dict(items=P(A, "Items to put in (IDs/names, '2x T8_POTION_COOLDOWN'); each replaces the item in its slot"),
+                     loadout=P(S, "Existing loadout JSON (in-game export) or @file to start from"), name=P(S, "Loadout name"),
+                     spells=P(S, "Spells: 'q=Heroic Strike; w=Hamstring; e=Spinning Blades; p=Deep Cuts; head=Retaliate/Balanced Mind'"),
+                     quality=P(I, "Quality 1-5 for all gear"), tier=P(I, "Tier for all gear (4-8)"),
+                     enchant=P(I, "Enchantment for all gear (0-4)"), icon=P(I, "Loadout icon id"), color=P(I, "Loadout color id"))),
     dict(name="build_optimizer", fn=optimizer.build_optimizer,
          desc="Find the most effective builds per silver for a PvPvE content (Mists, corrupted dungeons, hellgate PvE): every weapon "
               "of the chosen classes × armor kits × item-power levels, each simulated on the content's camps/rooms and dueled "
@@ -165,6 +174,22 @@ TOOLS = [
                      levels=P(S, "Base IP levels to try, comma separated", "800,900,1000,1100,1200"),
                      server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
                      pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10))),
+    dict(name="build_search", fn=optimizer.build_search,
+         desc="Best builds for a content within a re-gear budget: screens every weapon (or the given classes), then for the top "
+              "weapons searches every item family of every slot at every IP level, every active/passive spell, Q/W/E, offhands, "
+              "capes, potions and food, keeping the total price ≤ budget. Scores with the calibrated PvP model vs the killboard "
+              "field and, for Mists / corrupted / hellgate, the camp simulation. Returns the top builds with prices and import JSON.",
+         params=dict(content=P(S, "Content: corrupted_stalker, mists, hellgate, roads, black, arena_1v1…", "corrupted_stalker"),
+                     budget=P(N, "Max re-gear cost in silver (gear + consumables)", 300000),
+                     classes=P(S, "Weapon classes (items.sub1), comma separated; empty = all weapons"),
+                     weapons=P(I, "Weapons searched in depth (1-10)", 3),
+                     levels=P(S, "Base IP levels per slot, comma separated", "800,900,1000,1100,1200"),
+                     spec_ip=P(I, "IP from mastery on top of item IP", 100),
+                     server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     pages=P(I, "Killboard pages for the PvP field", 10), passes=P(I, "Search passes per weapon (1-4)", 2),
+                     maps=P(I, "Maps per PvE simulation", 4),
+                     pvp_weight=P(N, "Share of the score from PvP, 0-1 (rest: camp safety and fame/h); default 0.55 for PvE contents"),
+                     pvp_content=P(S, "Score PvP by another zone's rules / killboard scale (e.g. black, mists_duo)"))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "
@@ -190,6 +215,29 @@ TOOLS = [
                      pages=P(I, "Killboard pages of 51 kills (max 20)", 10), budget=P(N, "Max re-gear cost in silver"),
                      weapon=P(S, "Only builds with this weapon (ID or name)"), city=P(S, "Price city", "Caerleon"),
                      top=P(I, "Builds to show", 8), spec_ip=P(I, "IP your mastery adds on top of base item IP (for the cap set)", 100))),
+    dict(name="pvp_tune", fn=pvp.pvp_tune,
+         desc="Tune a loadout for PvP/PvPvE: searches every head/armor/shoes item with each active+passive spell, every cape, potion, "
+              "food and the weapon's Q/W/E combinations (same item power per slot) for the best average outcome against reference "
+              "ranged / melee / all builds at a given opponent IP; shows before/after matchups, the changes, top alternatives per "
+              "slot and the tuned set ready to import.",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export) or @file", required=True),
+                     content=P(S, "PvP content (see pvp_rules)", "corrupted_stalker"),
+                     vs=P(S, "Opponents: ranged / melee / all", "ranged", enum=["ranged", "melee", "all"]),
+                     opp_ip=P(N, "Opponents' in-game IP (default: 1.3 × the content's soft cap)"),
+                     ips=P(S, "Your in-game IP incl. mastery: 'avg=1020'"),
+                     slots=P(S, "Slots to tune, comma separated: " + ", ".join(pvp.TUNE_SLOTS)),
+                     passes=P(I, "Search passes (1-5)", 3), top=P(I, "Alternatives shown per slot", 5))),
+    dict(name="pvp_backtest", fn=pvp.pvp_backtest,
+         desc="Backtest the PvP duel model on real killboard solo kills (both players' gear, spells, IP): held-out accuracy, "
+              "log-loss and calibration for IP-only, the raw model and the calibrated feature model; fit=true refits and saves "
+              "the calibration that duel / pvp_check / pvp_tune use.",
+         params=dict(servers=P(S, "Servers, comma separated", "europe,west,east"), pages=P(I, "Killboard pages of 51 per server (≤20)", 20),
+                     fit=P(B, "Refit and save the calibration", False), test_share=P(N, "Held-out share (newest fights)", 0.3),
+                     collect=P(B, "Collect new killboard fights first", True))),
+    dict(name="killboard_collect", fn=pvp.killboard_collect,
+         desc="Accumulate solo killboard fights (both sides' gear and IP) into knowledge/killboard_fights.jsonl.gz — the training "
+              "data of the PvP calibration. The public feed holds only ~1 hour, so run it regularly.",
+         params=dict(servers=P(S, "Servers, comma separated", "europe,west,east"), pages=P(I, "Pages of 51 per server (≤20)", 20))),
     dict(name="farm_plan", fn=pvp.farm_plan,
          desc="Where to farm with a build: per PvP/PvPvE content — entry check, effective IP, win/death chance vs that fight size's "
               "killboard meta, reward multipliers, expected re-gear loss per hour and the silver/hour needed to break even "
