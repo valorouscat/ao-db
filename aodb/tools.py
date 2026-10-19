@@ -118,11 +118,16 @@ TOOLS = [
                      calibrate=P(B, "Shift margins by the calibration offset from real outcomes (knowledge/calibration.json)", True))),
     dict(name="record_outcome", fn=gearcheck.record_outcome,
          desc="Record a REAL fight result (loadouts, IP, content/tier/chest stage, outcome) in the calibration journal "
-              "knowledge/calibration.json; gear_check/group_check shift their margins by the mean model error over the journal. "
+              "knowledge/calibration.json; gear_check/group_check shift their margins by the mean model error over the journal; "
+              "Mists / corrupted / hellgate runs (min_hp required, clear_minutes recommended) fit that content's simulation "
+              "damage factor used by encounter_sim and build_optimizer. "
               "Use when the user reports how a run actually went. Commit the journal afterwards.",
          params=dict(loadouts=P(A, "One loadout JSON (or @file) per player", required=True),
-                     content=P(S, "avalon_solo (green), avalon_veteran (blue), avalon_elite (gold)", required=True),
-                     tier=P(I, "Content tier", required=True), stage=P(S, "Chest stage: small, medium, large", required=True),
+                     content=P(S, "Roads camps: avalon_solo (green), avalon_veteran (blue), avalon_elite (gold); or mists, "
+                                  "mists_dungeon, corrupted_hunter/stalker/slayer, hellgate", required=True),
+                     tier=P(I, "Content tier (Mists / dungeons: the content's default)"),
+                     stage=P(S, "Roads: chest stage small / medium / large (required); Mists / dungeons: the camp or map name "
+                                "if known (e.g. MISTS_M_PVE_MOR_CAMP_01, see encounter_sim)"),
                      outcome=P(S, "How it went", required=True, enum=list(gearcheck.OUTCOME_MARGIN)),
                      ips=P(S, "In-game IP per player as in group_check: 'avg=1250,mainhand=1300 | avg=1180'"),
                      intents=P(S, "Spell intents per player separated by '|'"), min_hp=P(N, "Lowest HP share during the fight, 0-1"),
@@ -173,7 +178,20 @@ TOOLS = [
                      spec_ip=P(I, "IP the player's mastery adds on top of base item power", 100),
                      levels=P(S, "Base IP levels to try, comma separated", "800,900,1000,1100,1200"),
                      server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
-                     pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10))),
+                     pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10),
+                     budget=P(I, "Max re-gear cost in silver: one band up to it instead of the fixed bands"),
+                     top=P(I, "Builds shown per budget band", 4),
+                     profile=P(S, "What the score rewards: balanced (35% camps, 10% fame/h, 40% PvP win, 15% PvP escape), farm "
+                                  "(camps + fame/h, escape players), hunter (winning fights), survivor (never losing the bag)",
+                               "balanced", enum=["balanced", "farm", "hunter", "survivor"]),
+                     weights=P(S, "Override profile weights: 'pvp_win=0.6,pve_safe=0.2' (keys pve_safe, pve_speed, pvp_win, "
+                                  "pvp_live; normalised to sum 1)"),
+                     distinct=P(B, "One row per weapon (its best armor kit and IP level)", False),
+                     kits=P(S, "Armor kits: both (5 fixed + the killboard's most worn head · armor · shoes sets), fixed, meta",
+                            "both", enum=["both", "fixed", "meta"]),
+                     meta_kit_count=P(I, "How many killboard kits to add", 3),
+                     meta_consumable_count=P(I, "Killboard food + potion sets tried on the shortlist (0 = only Roast Pork + "
+                                                "Healing Potion)", 3))),
     dict(name="build_search", fn=optimizer.build_search,
          desc="Best builds for a content within a re-gear budget: screens every weapon (or the given classes), then for the top "
               "weapons searches every item family of every slot at every IP level, every active/passive spell, Q/W/E, offhands, "
