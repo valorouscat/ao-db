@@ -436,7 +436,8 @@ def pve_summary(loadout, content, ips=None, intents=None, maps=4, ip_spec=None):
     mins = med([r["time"] for r in hi]) * cal["ts"] / 60
     return {"minutes": mins, "low": med([r["low"] for r in hi]), "low_pess": med([r["low"] for r in lo]),
             "fame_h": med([r["fame"] for r in hi]) * rules["fame"] / max(mins, 0.1) * 60, "elite": med([r["elite_death"] for r in hi]),
-            "tier": tier}
+            "failed": statistics.mean(r["deaths"] / max(r["pulls"], 1) for r in hi),
+            "failed_pess": statistics.mean(r["deaths"] / max(r["pulls"], 1) for r in lo), "tier": tier}
 
 
 SIM_NOTE = ("_Simulation: each pull (guards within 10 m) is fought in 0.5 s steps; your damage = auto-attacks + selected spells "

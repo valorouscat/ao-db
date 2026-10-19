@@ -174,6 +174,20 @@ TOOLS = [
                      levels=P(S, "Base IP levels to try, comma separated", "800,900,1000,1100,1200"),
                      server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
                      pages=P(I, "Killboard pages of 51 kills (max 20)", 20), shortlist=P(I, "Builds re-run at every IP level", 10))),
+    dict(name="build_search", fn=optimizer.build_search,
+         desc="Best builds for a content within a re-gear budget: screens every weapon (or the given classes), then for the top "
+              "weapons searches every item family of every slot at every IP level, every active/passive spell, Q/W/E, offhands, "
+              "capes, potions and food, keeping the total price ≤ budget. Scores with the calibrated PvP model vs the killboard "
+              "field and, for Mists / corrupted / hellgate, the camp simulation. Returns the top builds with prices and import JSON.",
+         params=dict(content=P(S, "Content: corrupted_stalker, mists, hellgate, roads, black, arena_1v1…", "corrupted_stalker"),
+                     budget=P(N, "Max re-gear cost in silver (gear + consumables)", 300000),
+                     classes=P(S, "Weapon classes (items.sub1), comma separated; empty = all weapons"),
+                     weapons=P(I, "Weapons searched in depth (1-10)", 3),
+                     levels=P(S, "Base IP levels per slot, comma separated", "800,900,1000,1100,1200"),
+                     spec_ip=P(I, "IP from mastery on top of item IP", 100),
+                     server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
+                     pages=P(I, "Killboard pages for the PvP field", 10), passes=P(I, "Search passes per weapon (1-4)", 2),
+                     maps=P(I, "Maps per PvE simulation", 4))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "

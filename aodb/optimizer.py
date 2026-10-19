@@ -2,7 +2,7 @@
 the content's monsters (encounter simulation) and against the killboard meta at the content's fight size (duel model),
 priced with the cheapest tier/enchant reaching each IP level, ranked by score and by score per silver within budget bands.
 """
-import math, statistics
+import json, math, statistics
 from . import core, combat, encounter, gearcheck, market, pvp
 from .core import AOError, q, q1, label, money, table
 
@@ -198,4 +198,233 @@ def build_optimizer(content="mists", tier=6, classes="bow,crossbow", spec_ip=100
     o.append(f"\n_IP = base item power of the gear + {spec_ip} assumed from mastery (pass spec_ip). Camp numbers are calibrated on "
              "the real-outcome journal; PvP is the duel model vs open-world killboard builds — skill, positioning and cooldown "
              "timing are not modelled. Spells: picked for PvP per slot (damage, CC, escapes)._")
+    return "\n".join(o)
+
+
+# ------------------------------------------------------------------ budget-constrained search over every item
+SEARCH_SLOTS = ("mainhand", "offhand", "head", "armor", "shoes", "cape", "potion", "food")
+SEARCH_WEIGHTS_PVE = {"pve_safe": 0.35, "pve_speed": 0.10, "pvp": 0.55}
+MIN_GAIN = 0.002  # smaller score differences are model noise: keep the current pick
+START = {"head": "HEAD_LEATHER_SET2", "armor": "ARMOR_LEATHER_SET1", "shoes": "SHOES_LEATHER_SET1", "cape": "CAPE",
+         "offhand": "OFF_TORCH"}
+
+
+def _gear_families(slot):
+    rows = q("SELECT DISTINCT base_id FROM items WHERE slot=? AND id GLOB 'T[4-8]_*' AND id NOT LIKE '%GATHERER%' "
+             "AND id NOT LIKE '%BACKPACK%' AND shopcat NOT IN ('skins', 'vanity') AND itempower>0", slot)
+    return sorted({gearcheck.advisor._family(r["base_id"]) for r in rows})
+
+
+def _consumables(slot):
+    return [r["id"] for r in q("SELECT id FROM items WHERE slot=? AND id GLOB 'T[4-8]_*' ORDER BY id", slot)]
+
+
+def build_search(content="corrupted_stalker", budget=300000, classes=None, weapons=3, levels=None, spec_ip=100, server="europe",
+                 city="Caerleon", pages=10, passes=2, maps=4):
+    """Best builds for a content within a re-gear budget: for the top weapons, every item family of every slot at every IP level
+    (cheapest priced tier/enchant), then every active/passive spell of the chosen item, Q/W/E of the weapon, offhands, capes,
+    potions and food — coordinate search that keeps the total price ≤ budget."""
+    budget = float(budget)
+    try:
+        pve_key = encounter.resolve(content)
+        zone = encounter.CONTENT[pve_key][3]
+    except AOError:
+        pve_key, zone = None, pvp.resolve_zone(content)
+    if not zone:
+        raise AOError(f"Unknown content {content!r}")
+    rules = pvp.zone_rules(zone)
+    levels = [int(x) for x in (levels.split(",") if isinstance(levels, str) else (levels or LEVELS))]
+    cls = [c.strip() for c in (classes.split(",") if isinstance(classes, str) else (classes or [])) if c.strip()]
+    wfams = weapon_families(cls) if cls else [r["id"][3:] for r in q("SELECT id FROM items WHERE shopcat='weapons' AND slot='mainhand' "
+                                                                       "AND tier=4 AND enchant=0 ORDER BY id")]
+    if not wfams:
+        raise AOError(f"No weapons for classes {cls}")
+    fams = {"mainhand": wfams, **{s: _gear_families(s) for s in ("offhand", "head", "armor", "shoes", "cape")}}
+    var = {(f, lv): _variant_at(f, lv) for s, fl in fams.items() for f in fl for lv in levels}
+    cons = {s: _consumables(s) for s in ("potion", "food")}
+    prices = market.price_map(sorted({v for vs in var.values() for v in vs} | {i for c in cons.values() for i in c}), server, city,
+                              estimate=True)
+    price = lambda i: prices.get(i, (None,))[0]
+    cheap = {}
+    for k_, vs in var.items():
+        pr = sorted((price(v), v) for v in vs if price(v))
+        if pr:
+            cheap[k_] = pr[0][1]
+    rows_f, fips, nev = pvp.field(rules["scale"], server, pages)
+    field = [(pvp.build_pvp_player(r["loadout"], {"avg_ip": r["ip"] or pvp._pct(fips, 0.5) or 1100}, rules), r["n"]) for r in rows_f[:8]]
+    if not field:
+        raise AOError("Empty killboard field; raise pages")
+    tw = sum(w for _, w in field)
+    cache, n_eval = {}, [0]
+    fame_ref = [1.0]
+
+    def cost(eq):
+        return sum((price(e["item"]) or float("inf")) * (e.get("stack") or 1) for e in eq.values())
+
+    def evaluate(eq):
+        key_ = json.dumps(eq, sort_keys=True)
+        if key_ in cache:
+            return cache[key_]
+        c = cost(eq)
+        if c > budget:
+            cache[key_] = (-1e9, None)
+            return cache[key_]
+        n_eval[0] += 1
+        lo = {"name": "search", "equipment": [eq[s] for s in SEARCH_SLOTS if s in eq]}
+        try:
+            me = pvp.build_pvp_player(lo, {"spec_ip": spec_ip}, rules)
+            duels = [(pvp.duel(me, o), w) for o, w in field]
+        except (AOError, KeyError, TypeError, ValueError, ZeroDivisionError):
+            cache[key_] = (-1e9, None)
+            return cache[key_]
+        win = sum(d["win"] * w for d, w in duels) / tw
+        die = sum(d["lose"] * w for d, w in duels) / tw
+        res = {"cost": c, "win": win, "die": die, "ip": me["avg"], "eff": me["eff_avg"], "spells": me["spells"], "pve": None}
+        s_pvp = (win - die + 1) / 2
+        if pve_key:
+            p = encounter.pve_summary(lo, pve_key, ip_spec={"spec_ip": spec_ip}, maps=maps) or \
+                {"low": 0, "low_pess": 0, "elite": 1, "fame_h": 0, "minutes": 99}
+            res["pve"] = p
+            # share of pulls survived (smooth), lowest HP, elite risk — lowest HP alone saturates at 0 after one failed pull
+            safe = 0.35 * (1 - p.get("failed", 1)) + 0.20 * (1 - p.get("failed_pess", 1)) + 0.15 * p["low"] + 0.15 * p["low_pess"] \
+                + 0.15 * (1 - p["elite"])
+            sc = (SEARCH_WEIGHTS_PVE["pve_safe"] * safe + SEARCH_WEIGHTS_PVE["pve_speed"] * min(p["fame_h"] / fame_ref[0], 1)
+                  + SEARCH_WEIGHTS_PVE["pvp"] * s_pvp)
+        else:
+            sc = s_pvp
+        res["score"] = sc
+        cache[key_] = (sc, res)
+        return cache[key_]
+
+    def gear(fam, lv):
+        i = cheap.get((fam, lv))
+        return {"item": i} if i else None
+
+    def two_handed(eq):
+        return core.item_json(eq["mainhand"]["item"]).get("@twohanded") == "true"
+
+    def start(wfam):
+        lv = levels[0]
+        eq = {"mainhand": gear(wfam, lv)}
+        if not eq["mainhand"]:
+            return None
+        if not two_handed(eq) and gear(START["offhand"], lv):
+            eq["offhand"] = gear(START["offhand"], lv)
+        for s_ in ("head", "armor", "shoes", "cape"):
+            g_ = gear(START[s_], lv)
+            if g_:
+                eq[s_] = g_
+        for s_, iid in (("potion", "T4_POTION_HEAL"), ("food", "T4_MEAL_SOUP")):
+            if price(iid):
+                eq[s_] = {"item": iid}
+        return eq if cost(eq) <= budget else None
+
+    def spell_options(slot, iid):
+        if slot == "mainhand":
+            kit = combat.weapon_spells(q1("SELECT base_id FROM items WHERE id=?", iid)["base_id"])
+            opts = [[o[0] for o in kit.get(s) or []] or [None] for s in ("1", "2", "3")]
+            pas = [o[0] for o in kit.get("passive") or []] or [None]
+            return [([x for x in (a, b, c) if x], [p_] if p_ else []) for a in opts[0] for b in opts[1] for c in opts[2] for p_ in pas]
+        actives, passives = gearcheck._slot_spells(iid)
+        return [([a[0]] if a else [], [p_[0]] if p_ else []) for a in ((actives[0] if actives else []) or [None])
+                for p_ in (passives or [None])]
+
+    def improve(eq, slot):
+        best_sc = evaluate(eq)[0]
+        best = eq
+        if slot in ("potion", "food"):
+            cands = [dict(eq, **{slot: {"item": i}}) for i in cons[slot] if price(i)]
+            cands.append({k: v for k, v in eq.items() if k != slot})
+        else:
+            if slot == "offhand" and two_handed(eq):
+                return eq
+            fl = fams[slot] if slot != "mainhand" else [gearcheck.advisor._family(eq["mainhand"]["item"])]
+            cands = []
+            for f in fl:
+                for lv in levels:
+                    g_ = gear(f, lv)
+                    if g_:
+                        cands.append(dict(eq, **{slot: g_}))
+            if slot == "cape":
+                cands.append({k: v for k, v in eq.items() if k != "cape"})
+        for c in cands:
+            sc = evaluate(c)[0]
+            if sc > best_sc + MIN_GAIN:
+                best_sc, best = sc, c
+        if slot in ("mainhand", "head", "armor", "shoes") and slot in best:  # every spell combination of the chosen item
+            iid = best[slot]["item"]
+            for act, pas in spell_options(slot, iid):
+                e = {"item": iid}
+                if act:
+                    e["activeSpells"] = act
+                if pas:
+                    e["passiveSpells"] = pas
+                c = dict(best, **{slot: e})
+                sc = evaluate(c)[0]
+                if sc > best_sc + MIN_GAIN:
+                    best_sc, best = sc, c
+        return best
+
+    # stage 1: every weapon family on the starting kit → fame reference and the weapon shortlist
+    starts = {w: start(w) for w in wfams}
+    starts = {w: e for w, e in starts.items() if e}
+    if not starts:
+        raise AOError(f"No weapon fits {money(budget)} with the cheapest kit at {levels[0]} IP")
+    if pve_key:
+        fames = [encounter.pve_summary({"name": "s", "equipment": list(e.values())}, pve_key, ip_spec={"spec_ip": spec_ip}, maps=maps)
+                 for e in starts.values()]
+        fame_ref[0] = max([f["fame_h"] for f in fames if f] or [1]) or 1
+    ranked = sorted(starts, key=lambda w: -evaluate(starts[w])[0])
+    results = []
+    for w in ranked[:max(1, min(int(weapons), 10))]:
+        eq = starts[w]
+        for _ in range(max(1, min(int(passes), 4))):
+            before = evaluate(eq)[0]
+            for s_ in SEARCH_SLOTS:
+                eq = improve(eq, s_)
+            if evaluate(eq)[0] <= before + 1e-9:
+                break
+        results.append((evaluate(eq), eq))
+    results.sort(key=lambda r: -r[0][0])
+
+    def desc(e):
+        sp = ", ".join(pvp._spell_name(x) for x in (e.get("activeSpells") or []) + (e.get("passiveSpells") or []))
+        return label(e["item"]) + (f" — {sp}" if sp else "")
+    o = [f"## Build search — {rules['title']} · budget {money(budget)}", "",
+         f"{len(starts)} weapons screened, top {len(results)} searched: every item family of every slot × IP levels "
+         f"{', '.join(map(str, levels))} (+{spec_ip} mastery) × every active/passive spell, offhands, capes, potions, food; "
+         f"{n_eval[0]} builds simulated. PvP: calibrated duel model vs {len(field)} killboard builds ({rules['scale']} fights, "
+         f"{nev} kills)" + (f"; PvE: encounter simulation of {encounter.CONTENT[pve_key][0]} ({maps} maps)" if pve_key else "")
+         + ". Score = " + (f"{SEARCH_WEIGHTS_PVE['pve_safe']:.0%} camp safety + {SEARCH_WEIGHTS_PVE['pve_speed']:.0%} fame/h + "
+                           f"{SEARCH_WEIGHTS_PVE['pvp']:.0%} PvP (win − death)" if pve_key else "PvP (win − death) vs the field") + "."]
+    if market.WARNINGS:
+        o.append(f"_Prices incomplete: {'; '.join(market.WARNINGS)}_")
+    rows = []
+    for (sc, r), eq in results:
+        p = r["pve"]
+        rows.append((label(eq["mainhand"]["item"]), money(r["cost"]), f"{r['ip']:.0f} → {r['eff']:.0f}", f"{r['win']:.0%}", f"{r['die']:.0%}",
+                     f"{p['failed']:.0%} / {p['failed_pess']:.0%}" if p else "—", f"{p['fame_h'] / 1e6:.2f}M" if p else "—", f"{sc:.3f}"))
+    o.append(table(rows, ["weapon", "cost", "IP (→ cap)", "PvP win", "PvP die", "pulls failed @90/@50 dodge", "fame/h", "score"]))
+    def with_spells(slot, e):
+        e = dict(e)
+        if slot == "mainhand" and not e.get("activeSpells"):
+            e["activeSpells"] = pvp.pick_pvp_spells(e["item"])
+        elif slot in ("head", "armor", "shoes") and not e.get("activeSpells"):
+            act, pas = pvp.pick_armor_spells(e["item"])
+            if act:
+                e["activeSpells"] = [act]
+            if pas and not e.get("passiveSpells"):
+                e["passiveSpells"] = [pas]
+        return e
+    results = [(r, {s: with_spells(s, e) for s, e in eq.items()}) for r, eq in results]
+    for i, ((sc, r), eq) in enumerate(results[:3]):
+        lo = {"version": 1, "name": f"build search {i + 1}", "icon": 20, "color": 10,
+              "equipment": [dict(eq[s], **({"stack": 2} if s == "potion" else {})) for s in SEARCH_SLOTS if s in eq]}
+        o.append(f"\n### #{i + 1} {label(eq['mainhand']['item'])} — {money(r['cost'])}\n"
+                 + "\n".join(f"- {s}: {desc(eq[s])} · {money(price(eq[s]['item']) or 0)}" for s in SEARCH_SLOTS if s in eq)
+                 + "\n```json\n" + json.dumps(lo, ensure_ascii=False, separators=(",", ":")) + "\n```")
+    o.append("\n_Search: coordinate ascent per weapon (each slot fully enumerated given the others, repeated until no slot "
+             "improves) — a local optimum of the full ~10¹² combination space, not a proof of the global one. Win chances: "
+             "the PvP model is calibrated on killboard kills (IP + item families, 79.5% held-out; spells and consumables are not "
+             "validated by data). Prices: cheapest listed tier/enchant per IP level, estimates where the market had none._")
     return "\n".join(o)

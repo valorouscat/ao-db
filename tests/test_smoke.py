@@ -120,6 +120,19 @@ class PvpSpellModel(unittest.TestCase):
         self.assertIn("score", t)
 
 
+class BuildSearch(unittest.TestCase):
+    def test_out_of_combat_spell_is_inert(self):
+        self.assertEqual(pvp.pvp_spell("OUTOFCOMBATHEAL")["heal"], 0.0)
+
+    def test_search_respects_budget(self):
+        with mock.patch.object(pvp, "field", return_value=([{"loadout": LOADOUT, "ip": 1100, "n": 1, "kills": 1, "deaths": 0, "kd": 1}], [1100], 1)):
+            t = optimizer.build_search("corrupted_stalker", budget=120000, classes="sword", weapons=1, passes=1, maps=1,
+                                       levels="800,900")
+        self.assertIn("### #1", t)
+        costs = [int(x.replace(",", "")) for x in re.findall(r"— ([\d,]+)\n- mainhand", t)]
+        self.assertTrue(costs and all(c <= 120000 for c in costs))
+
+
 class LoadoutExport(unittest.TestCase):
     def test_export_roundtrip(self):
         t = gearcheck.loadout_export(loadout=json.dumps(LOADOUT), enchant=2, spells="w=Frost Shot; head=Energizing Shield")

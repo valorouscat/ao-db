@@ -234,6 +234,9 @@ def pvp_spell(sid):
     d = combat.spell_json(sid)
     if not d:
         return None
+    if d.get("@usableincombat") == "false":  # out-of-combat spells contribute nothing in a fight
+        return {"dmg": 0.0, "cycle": max(core.num(d.get("@recastdelay")) or 1.0, combat.GCD), "aoe": False, "types": {}, "shield": 0.0,
+                "heal": 0.0, "lifesteal": 0.0}
     w = PvpWalk()
     w.spell(sid)
     p = combat.spell_profile(sid, "players") or {"dmg": 0.0, "cycle": core.num(d.get("@recastdelay")) or 1.0, "aoe": False, "types": {}}
