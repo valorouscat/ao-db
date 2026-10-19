@@ -720,6 +720,7 @@ def _is_fight(p):
 
 
 KB_STORE = os.path.join(core.ROOT, "knowledge", "killboard_fights.jsonl.gz")
+KB_MIN_IP = 300
 
 
 def _compact_side(p):
@@ -776,6 +777,8 @@ def kb_pairs(fights):
     """[(timestamp, features of killer vs victim, raw p(killer), IP gap)] from stored compact fights."""
     out = []
     for r in fights:
+        if min(r["k"]["ip"] or 0, r["v"]["ip"] or 0) < KB_MIN_IP:  # naked / broken records say nothing about builds
+            continue
         K, V = _expand_side(r["k"]), _expand_side(r["v"])
         try:
             a = build_pvp_player(_kb_loadout(K), {"avg_ip": K["AverageItemPower"]})
