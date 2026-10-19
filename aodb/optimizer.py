@@ -378,6 +378,14 @@ def _consumables(slot):
 
 def build_search(content="corrupted_stalker", budget=300000, classes=None, weapons=3, levels=None, spec_ip=100, server="europe",
                  city="Caerleon", pages=10, passes=2, maps=4, pvp_weight=None, pvp_content=None):
+    """Advice-mode wrapper: gear changes are scored with IP acting only through item stats (see pvp.advice_mode)."""
+    with pvp.advice_mode():
+        return _build_search(content, budget, classes, weapons, levels, spec_ip, server, city, pages, passes, maps, pvp_weight,
+                             pvp_content)
+
+
+def _build_search(content="corrupted_stalker", budget=300000, classes=None, weapons=3, levels=None, spec_ip=100, server="europe",
+                  city="Caerleon", pages=10, passes=2, maps=4, pvp_weight=None, pvp_content=None):
     """Best builds for a content within a re-gear budget: for the top weapons, every item family of every slot at every IP level
     (cheapest priced tier/enchant), then every active/passive spell of the chosen item, Q/W/E of the weapon, offhands, capes,
     potions and food — coordinate search that keeps the total price ≤ budget."""
