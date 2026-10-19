@@ -44,10 +44,12 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      loadout: effective IP and wasted IP above the cap, kit vs players, gaps such as no cleanse/escape, matchups),
      `pvp_tune` (searches every head/armor/shoes item × active × passive, cape, potion, food and the weapon's Q/W/E vs reference
      ranged / melee builds at a given opponent IP → best set, per-slot alternatives, import JSON),
+     `killboard_collect` (append the latest solo kills to knowledge/killboard_fights.jsonl.gz — run before re-fitting; commit the file),
      `pvp_backtest` (held-out accuracy of the duel model on real killboard kills; fit=true refreshes knowledge/pvp_calibration.json —
      win chances in pvp_check/pvp_tune are calibrated on IP + item families; quote its test accuracy, re-fit after model changes),
      `build_search` (best builds for a content + budget: screens all weapons, then every item family × IP level × spell per
-     slot, offhands, capes, potions, food within the budget; prices + import JSON — use it for "best build for X under N silver"),
+     slot, offhands, capes, potions, food within the budget; prices + import JSON — use it for "best build for X under N silver";
+     PvP and PvE are separate models combined by `pvp_weight`; `pvp_content` scores PvP by another zone's rules),
      `farm_plan` (where to farm: win/death chance vs the meta, expected re-gear loss/h, break-even silver/h). The public
      killboard covers open-world kills only — say it is a proxy for instanced content. Fights/hour are assumptions: ask the
      user for their real numbers and pass `encounters_per_hour` / `silver_per_hour`.

@@ -670,24 +670,72 @@ def _is_fight(p):
     return mh and "TOOL" not in mh and "GATHERER" not in json.dumps(eq)
 
 
-def kb_pairs(servers=("europe", "west", "east"), pages=20):
-    """[(event id, features of killer vs victim, raw p(killer), IP gap)] for solo kills of armed, non-gathering players."""
-    out, seen = [], set()
-    for srv in servers:
-        for e in advisor._events(srv, pages):
-            if e["EventId"] in seen or (e.get("numberOfParticipants") or len(e.get("Participants") or [])) != 1:
+KB_STORE = os.path.join(core.ROOT, "knowledge", "killboard_fights.jsonl.gz")
+
+
+def _compact_side(p):
+    eq = {sl: [it["Type"], it.get("Quality") or 1] for sl, it in (p.get("Equipment") or {}).items() if sl in KB_SLOTS and it and it.get("Type")}
+    return {"ip": p.get("AverageItemPower") or 0, "eq": eq}
+
+
+def _expand_side(c):
+    return {"Name": "?", "AverageItemPower": c["ip"], "Equipment": {sl: {"Type": t, "Quality": q_} for sl, (t, q_) in c["eq"].items()}}
+
+
+def kb_store():
+    """{event id: compact solo fight} accumulated by killboard_collect."""
+    import gzip
+    out = {}
+    try:
+        with gzip.open(KB_STORE, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                r = json.loads(line)
+                out[r["id"]] = r
+    except OSError:
+        pass
+    return out
+
+
+def killboard_collect(servers="europe,west,east", pages=20):
+    """Append new solo kills (armed, non-gathering, both sides' gear + IP) from the killboard to
+    knowledge/killboard_fights.jsonl.gz — the training data of the PvP calibration. Run it regularly: the public feed only
+    holds the last ~1000 events per server (≈ 1 hour)."""
+    import gzip
+    store = kb_store()
+    before = len(store)
+    srv = tuple(x.strip() for x in str(servers).split(",") if x.strip())
+    per = Counter()
+    for sv in srv:
+        advisor._kb_cache.clear()
+        for e in advisor._events(sv, pages):
+            if e["EventId"] in store or (e.get("numberOfParticipants") or len(e.get("Participants") or [])) != 1:
                 continue
-            seen.add(e["EventId"])
             K, V = e["Killer"], e["Victim"]
             if not (_is_fight(K) and _is_fight(V)):
                 continue
-            try:
-                a = build_pvp_player(_kb_loadout(K), {"avg_ip": K["AverageItemPower"]})
-                b = build_pvp_player(_kb_loadout(V), {"avg_ip": V["AverageItemPower"]})
-                t_ab, t_ba = _ttk(a, b), _ttk(b, a)
-            except (AOError, KeyError, TypeError, ValueError, ZeroDivisionError):
-                continue
-            out.append((e["EventId"], pair_features(a, b, t_ab, t_ba), 1 / (1 + (t_ab / t_ba) ** DUEL_K), a["eff_avg"] - b["eff_avg"]))
+            store[e["EventId"]] = {"id": e["EventId"], "t": e.get("TimeStamp", "")[:19], "srv": sv, "k": _compact_side(K), "v": _compact_side(V)}
+            per[sv] += 1
+    with gzip.open(KB_STORE, "wt", encoding="utf-8") as fh:
+        for r in sorted(store.values(), key=lambda r: r["t"]):
+            fh.write(json.dumps(r, separators=(",", ":")) + "\n")
+    ts = sorted(r["t"] for r in store.values())
+    return (f"## Killboard collection\nAdded **{len(store) - before}** solo fights ("
+            + ", ".join(f"{k} {v}" for k, v in per.items()) + f"); stored **{len(store)}** fights"
+            + (f", {ts[0]} → {ts[-1]} UTC" if ts else "") + ".\nRe-fit the calibration with `pvp_backtest fit=true`.")
+
+
+def kb_pairs(fights):
+    """[(timestamp, features of killer vs victim, raw p(killer), IP gap)] from stored compact fights."""
+    out = []
+    for r in fights:
+        K, V = _expand_side(r["k"]), _expand_side(r["v"])
+        try:
+            a = build_pvp_player(_kb_loadout(K), {"avg_ip": K["AverageItemPower"]})
+            b = build_pvp_player(_kb_loadout(V), {"avg_ip": V["AverageItemPower"]})
+            t_ab, t_ba = _ttk(a, b), _ttk(b, a)
+        except (AOError, KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+        out.append((r["t"], pair_features(a, b, t_ab, t_ba), 1 / (1 + (t_ab / t_ba) ** DUEL_K), a["eff_avg"] - b["eff_avg"]))
     return out
 
 
@@ -726,17 +774,20 @@ def _metrics(ps):
     return (sum(p > 0.5 for p in ps) / len(ps), -sum(math.log(p) for p in ps) / len(ps), {b_: v for b_, v in sorted(bins.items())})
 
 
-def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3):
+def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3, collect=True):
     """Backtest the duel model on killboard solo kills (killer vs victim with their real gear and IP): accuracy, log-loss and
     calibration on a held-out split for IP-only, the raw TTK model and the calibrated feature model; fit=True refits the
     calibration on all fights and saves it to knowledge/pvp_calibration.json (used by duel / pvp_check / pvp_tune)."""
     srv = tuple(x.strip() for x in str(servers).split(",") if x.strip())
-    rows = kb_pairs(srv, pages)
+    if collect:
+        killboard_collect(servers, pages)
+    rows = sorted(kb_pairs(kb_store().values()), key=lambda r: r[0])
     if len(rows) < 100:
-        raise AOError(f"Only {len(rows)} usable fights — fetch more pages/servers")
-    test = [r for r in rows if r[0] % 10 < round(test_share * 10)]
-    train = [r for r in rows if r not in test]
-    o = [f"## PvP model backtest — {len(rows)} solo kills ({', '.join(srv)}, {pages} pages each); train {len(train)} / test {len(test)}", ""]
+        raise AOError(f"Only {len(rows)} usable fights — run killboard_collect a few times")
+    cut = int(len(rows) * (1 - test_share))  # time split: the newest fights are the test set (no look-ahead)
+    train, test = rows[:cut], rows[cut:]
+    o = [f"## PvP model backtest — {len(rows)} stored solo kills ({rows[0][0]} → {rows[-1][0]} UTC); train {len(train)} / "
+         f"test {len(test)} (newest {test_share:.0%})", ""]
     tr = [r[1] for r in train]
     w_ip = _fit_logistic(tr, lambda k: k == "dip")
     w_kit = _fit_logistic(tr, lambda k: ":" not in k)
@@ -765,7 +816,8 @@ def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3
     if fit:
         w_final = _fit_logistic([r[1] for r in rows])
         acc, ll, _ = _metrics(res["IP + kit + items (calibrated)"])
-        cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4}, "n": len(rows), "servers": list(srv),
+        cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4}, "n": len(rows),
+               "period": [rows[0][0], rows[-1][0]],
                "trained": time.strftime("%Y-%m-%d"), "test_accuracy": round(acc, 4), "test_logloss": round(ll, 4)}
         with open(CAL_PATH, "w", encoding="utf-8") as fh:
             json.dump(cal, fh, indent=1)

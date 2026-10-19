@@ -220,7 +220,7 @@ def _consumables(slot):
 
 
 def build_search(content="corrupted_stalker", budget=300000, classes=None, weapons=3, levels=None, spec_ip=100, server="europe",
-                 city="Caerleon", pages=10, passes=2, maps=4):
+                 city="Caerleon", pages=10, passes=2, maps=4, pvp_weight=None, pvp_content=None):
     """Best builds for a content within a re-gear budget: for the top weapons, every item family of every slot at every IP level
     (cheapest priced tier/enchant), then every active/passive spell of the chosen item, Q/W/E of the weapon, offhands, capes,
     potions and food — coordinate search that keeps the total price ≤ budget."""
@@ -230,9 +230,13 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
         zone = encounter.CONTENT[pve_key][3]
     except AOError:
         pve_key, zone = None, pvp.resolve_zone(content)
+    if pvp_content:  # fight rules of another zone (farm Mists camps, fight by black-zone rules…)
+        zone = pvp.resolve_zone(pvp_content) or zone
     if not zone:
         raise AOError(f"Unknown content {content!r}")
     rules = pvp.zone_rules(zone)
+    wp = SEARCH_WEIGHTS_PVE["pvp"] if pvp_weight is None else min(max(float(pvp_weight), 0.0), 1.0)
+    weights = {"pvp": wp, "pve_safe": (1 - wp) * 0.78, "pve_speed": (1 - wp) * 0.22} if pve_key else {"pvp": 1.0}
     levels = [int(x) for x in (levels.split(",") if isinstance(levels, str) else (levels or LEVELS))]
     cls = [c.strip() for c in (classes.split(",") if isinstance(classes, str) else (classes or [])) if c.strip()]
     wfams = weapon_families(cls) if cls else [r["id"][3:] for r in q("SELECT id FROM items WHERE shopcat='weapons' AND slot='mainhand' "
@@ -288,8 +292,7 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
             # share of pulls survived (smooth), lowest HP, elite risk — lowest HP alone saturates at 0 after one failed pull
             safe = 0.35 * (1 - p.get("failed", 1)) + 0.20 * (1 - p.get("failed_pess", 1)) + 0.15 * p["low"] + 0.15 * p["low_pess"] \
                 + 0.15 * (1 - p["elite"])
-            sc = (SEARCH_WEIGHTS_PVE["pve_safe"] * safe + SEARCH_WEIGHTS_PVE["pve_speed"] * min(p["fame_h"] / fame_ref[0], 1)
-                  + SEARCH_WEIGHTS_PVE["pvp"] * s_pvp)
+            sc = weights["pve_safe"] * safe + weights["pve_speed"] * min(p["fame_h"] / fame_ref[0], 1) + weights["pvp"] * s_pvp
         else:
             sc = s_pvp
         res["score"] = sc
@@ -395,8 +398,8 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
          f"{', '.join(map(str, levels))} (+{spec_ip} mastery) × every active/passive spell, offhands, capes, potions, food; "
          f"{n_eval[0]} builds simulated. PvP: calibrated duel model vs {len(field)} killboard builds ({rules['scale']} fights, "
          f"{nev} kills)" + (f"; PvE: encounter simulation of {encounter.CONTENT[pve_key][0]} ({maps} maps)" if pve_key else "")
-         + ". Score = " + (f"{SEARCH_WEIGHTS_PVE['pve_safe']:.0%} camp safety + {SEARCH_WEIGHTS_PVE['pve_speed']:.0%} fame/h + "
-                           f"{SEARCH_WEIGHTS_PVE['pvp']:.0%} PvP (win − death)" if pve_key else "PvP (win − death) vs the field") + "."]
+         + ". Score = " + (f"{weights['pve_safe']:.0%} camp safety + {weights['pve_speed']:.0%} fame/h + "
+                           f"{weights['pvp']:.0%} PvP (win − death, {rules['title']})" if pve_key else "PvP (win − death) vs the field") + "."]
     if market.WARNINGS:
         o.append(f"_Prices incomplete: {'; '.join(market.WARNINGS)}_")
     rows = []

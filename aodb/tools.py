@@ -187,7 +187,9 @@ TOOLS = [
                      spec_ip=P(I, "IP from mastery on top of item IP", 100),
                      server=P(S, "Server", "europe", enum=list(market.SERVERS)), city=P(S, "Price city", "Caerleon"),
                      pages=P(I, "Killboard pages for the PvP field", 10), passes=P(I, "Search passes per weapon (1-4)", 2),
-                     maps=P(I, "Maps per PvE simulation", 4))),
+                     maps=P(I, "Maps per PvE simulation", 4),
+                     pvp_weight=P(N, "Share of the score from PvP, 0-1 (rest: camp safety and fame/h); default 0.55 for PvE contents"),
+                     pvp_content=P(S, "Score PvP by another zone's rules / killboard scale (e.g. black, mists_duo)"))),
     dict(name="pvp_rules", fn=pvp.pvp_rules,
          desc="Rules of PvP / PvPvE content from the game data (worldsettings.json archetypes): full loot or not, PvP rule, item-power "
               "soft cap and the factor above it, entry IP, team size, loot/silver/fame multipliers. Mists, corrupted dungeons "
@@ -230,7 +232,12 @@ TOOLS = [
               "log-loss and calibration for IP-only, the raw model and the calibrated feature model; fit=true refits and saves "
               "the calibration that duel / pvp_check / pvp_tune use.",
          params=dict(servers=P(S, "Servers, comma separated", "europe,west,east"), pages=P(I, "Killboard pages of 51 per server (≤20)", 20),
-                     fit=P(B, "Refit and save the calibration", False), test_share=P(N, "Held-out share", 0.3))),
+                     fit=P(B, "Refit and save the calibration", False), test_share=P(N, "Held-out share (newest fights)", 0.3),
+                     collect=P(B, "Collect new killboard fights first", True))),
+    dict(name="killboard_collect", fn=pvp.killboard_collect,
+         desc="Accumulate solo killboard fights (both sides' gear and IP) into knowledge/killboard_fights.jsonl.gz — the training "
+              "data of the PvP calibration. The public feed holds only ~1 hour, so run it regularly.",
+         params=dict(servers=P(S, "Servers, comma separated", "europe,west,east"), pages=P(I, "Pages of 51 per server (≤20)", 20))),
     dict(name="farm_plan", fn=pvp.farm_plan,
          desc="Where to farm with a build: per PvP/PvPvE content — entry check, effective IP, win/death chance vs that fight size's "
               "killboard meta, reward multipliers, expected re-gear loss per hour and the silver/hour needed to break even "
