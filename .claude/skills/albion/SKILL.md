@@ -42,6 +42,8 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      factor, entry IP, team, reward multipliers — from worldsettings.json), `pvp_builds` (killboard builds at the content's fight
      size simulated against each other at the cap IP, cheapest tier/enchant set reaching the cap), `pvp_check` (a player's
      loadout: effective IP and wasted IP above the cap, kit vs players, gaps such as no cleanse/escape, matchups),
+     `pvp_tune` (searches every head/armor/shoes item × active × passive, cape, potion, food and the weapon's Q/W/E vs reference
+     ranged / melee builds at a given opponent IP → best set, per-slot alternatives, import JSON),
      `farm_plan` (where to farm: win/death chance vs the meta, expected re-gear loss/h, break-even silver/h). The public
      killboard covers open-world kills only — say it is a proxy for instanced content. Fights/hour are assumptions: ask the
      user for their real numbers and pass `encounters_per_hour` / `silver_per_hour`.

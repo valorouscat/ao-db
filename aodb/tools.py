@@ -199,6 +199,18 @@ TOOLS = [
                      pages=P(I, "Killboard pages of 51 kills (max 20)", 10), budget=P(N, "Max re-gear cost in silver"),
                      weapon=P(S, "Only builds with this weapon (ID or name)"), city=P(S, "Price city", "Caerleon"),
                      top=P(I, "Builds to show", 8), spec_ip=P(I, "IP your mastery adds on top of base item IP (for the cap set)", 100))),
+    dict(name="pvp_tune", fn=pvp.pvp_tune,
+         desc="Tune a loadout for PvP/PvPvE: searches every head/armor/shoes item with each active+passive spell, every cape, potion, "
+              "food and the weapon's Q/W/E combinations (same item power per slot) for the best average outcome against reference "
+              "ranged / melee / all builds at a given opponent IP; shows before/after matchups, the changes, top alternatives per "
+              "slot and the tuned set ready to import.",
+         params=dict(loadout=P(S, "Loadout JSON (in-game export) or @file", required=True),
+                     content=P(S, "PvP content (see pvp_rules)", "corrupted_stalker"),
+                     vs=P(S, "Opponents: ranged / melee / all", "ranged", enum=["ranged", "melee", "all"]),
+                     opp_ip=P(N, "Opponents' in-game IP (default: 1.3 × the content's soft cap)"),
+                     ips=P(S, "Your in-game IP incl. mastery: 'avg=1020'"),
+                     slots=P(S, "Slots to tune, comma separated: " + ", ".join(pvp.TUNE_SLOTS)),
+                     passes=P(I, "Search passes (1-5)", 3), top=P(I, "Alternatives shown per slot", 5))),
     dict(name="farm_plan", fn=pvp.farm_plan,
          desc="Where to farm with a build: per PvP/PvPvE content — entry check, effective IP, win/death chance vs that fight size's "
               "killboard meta, reward multipliers, expected re-gear loss per hour and the silver/hour needed to break even "

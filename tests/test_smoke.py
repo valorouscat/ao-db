@@ -92,6 +92,34 @@ LOADOUT = {"name": "bow", "equipment": [
     {"item": "T4_CAPEITEM_FW_THETFORD@2", "quality": 3}, {"item": "T8_POTION_CLEANSE"}, {"item": "T7_MEAL_ROAST", "stack": 3}]}
 
 
+class PvpSpellModel(unittest.TestCase):
+    def test_defense_rating_and_reflect(self):
+        self.assertAlmostEqual(pvp.defense_dr(1.17), 1 - 1 / 2.17)
+        r = pvp.pvp_spell("RETALIATE2")
+        self.assertAlmostEqual(r["reflectpk"], 0.85)
+        self.assertGreater(r["dr_p"], 0)
+
+    def test_immunities_and_conditions(self):
+        self.assertFalse(pvp.pvp_spell("CASTBUBBLE").get("invuln"))  # immune to knockbacks only, not to damage
+        self.assertFalse(pvp.pvp_spell("DELAYED_TELEPORT").get("invuln"))  # AIR_RAID sits in a condition, not a cast
+        self.assertFalse(pvp.pvp_spell(core.item_json("T7_POTION_MOB_RESET@3")["@consumespell"]).get("invis"))  # mobs only
+
+    def test_potion_and_cape(self):
+        self.assertEqual(pvp.potion_damage("POTION_POISON_P5"), (475.0, True))
+        proc = pvp.cape_proc("PASSIVE_CAPE_SMUGGLER")
+        self.assertTrue(proc[2])
+        self.assertGreaterEqual(proc[1], 100)
+
+    def test_armor_spells_autopicked(self):
+        p = pvp.build_pvp_player(json.dumps({"equipment": [{"item": "T5_2H_DUALSWORD@1"}, {"item": "T5_ARMOR_LEATHER_SET1@1"}]}))
+        self.assertTrue(any(sl == "armor" for sl, _ in p["spells"]))
+
+    def test_tune(self):
+        t = pvp.pvp_tune(json.dumps(LOADOUT), "stalker", vs="ranged", opp_ip=1300, slots="head,food", passes=1)
+        self.assertIn("### Import", t)
+        self.assertIn("score", t)
+
+
 class LoadoutExport(unittest.TestCase):
     def test_export_roundtrip(self):
         t = gearcheck.loadout_export(loadout=json.dumps(LOADOUT), enchant=2, spells="w=Frost Shot; head=Energizing Shield")
