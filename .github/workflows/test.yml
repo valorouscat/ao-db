@@ -3,9 +3,12 @@ on: [push, pull_request, workflow_dispatch]
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12"]  # 3.11 is the cloud sessions' default interpreter (scheduled tasks run on it)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: { python-version: "${{ matrix.python }}" }
       - run: ./setup.sh
       - run: python3 -m unittest discover -v tests

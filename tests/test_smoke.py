@@ -2,7 +2,7 @@
 import json, os, re, unittest
 import tempfile
 from unittest import mock
-from aodb import advisor, core, encounter, gearcheck, market, mcp_server, optimizer, patchnotes, pvp
+from aodb import advisor, combat, core, encounter, gearcheck, market, mcp_server, optimizer, patchnotes, pvp
 from aodb.tools import TOOLS, call
 
 
@@ -221,6 +221,26 @@ class GearCheck(unittest.TestCase):
         with self.assertRaises(gearcheck.AOError):
             gearcheck.record_outcome(json.dumps(LOADOUT), "green", 6, "large", "meh", save=False)
 
+    def test_mists_calibration_group(self):
+        import pathlib, shutil
+        d = pathlib.Path(tempfile.mkdtemp()) / "calibration.json"
+        shutil.copy(gearcheck.CALIBRATION_FILE, d)
+        with mock.patch.object(gearcheck, "CALIBRATION_FILE", d):
+            encounter._cal.clear()
+            self.assertEqual(encounter.sim_calibration("mists")["borrowed"], ["roads"])
+            roads_k = encounter.sim_calibration("green")["k"]
+            t = gearcheck.record_outcome(json.dumps(LOADOUT), "мгла", outcome="doable", min_hp=0.35, clear_minutes=7, save=False)
+            self.assertIn("lowest HP: you 35%", t)
+            self.assertEqual(encounter.sim_calibration("mists")["borrowed"], ["roads"])      # dry run: journal untouched
+            with self.assertRaises(core.AOError):
+                gearcheck.record_outcome(json.dumps(LOADOUT), "mists", outcome="easy")        # min_hp is required
+            gearcheck.record_outcome(json.dumps(LOADOUT), "mists", outcome="doable", min_hp=0.35, clear_minutes=7)
+            mists = encounter.sim_calibration("mists")
+            self.assertEqual((mists["n"], mists["tn"], mists["borrowed"]), (1, 1, []))
+            self.assertEqual(encounter.sim_calibration("green")["k"], roads_k)              # other groups keep their factor
+            self.assertIn("mists", gearcheck.calibration())
+        encounter._cal.clear()
+
     def test_intents(self):
         self.assertEqual(gearcheck.parse_intents("Q W на урон"), {"1": "damage", "2": "damage"})
         _, e = gearcheck.parse_loadout(json.dumps({"equipment": [{"item": "T4_MAIN_NATURESTAFF_KEEPER@1"}]}))
@@ -394,6 +414,52 @@ class Encounters(unittest.TestCase):
         self.assertTrue(market._absurd("T8_POTION_CLEANSE", 13_000_000))           # troll listing
         self.assertFalse(market._absurd("T8_POTION_CLEANSE", 15_000))
 
+    def test_meta_kits(self):
+        act, pas = optimizer.armor_spells("ARMOR_CLOTH_SET2")  # the active with the best PvP value; passive by preference
+        opts = [o[0] for o in combat.weapon_spells("T4_ARMOR_CLOTH_SET2").get("passive", []) if not o[0].startswith("PASSIVE_")]
+        self.assertEqual(act, max((o for o in opts if o != "OUTOFCOMBATHEAL"), key=pvp.pvp_value))
+        self.assertEqual(pas, "PASSIVE_ARMOR_INCREASED_DAMAGE")
+        act, pas = optimizer.armor_spells("ARMOR_PLATE_AVALON")                 # artifact armor: actives and passives mixed in data
+        self.assertFalse(act.startswith("PASSIVE_"))
+        self.assertTrue(pas.startswith("PASSIVE_"))
+        kill = lambda h, a, sh, cape: {"numberOfParticipants": 1, "Killer": {"Equipment": {
+            "Head": {"Type": h}, "Armor": {"Type": a}, "Shoes": {"Type": sh}, "Cape": {"Type": cape}}}}
+        evs = [kill("T6_HEAD_LEATHER_SET2", "T6_ARMOR_CLOTH_SET2", "T6_SHOES_PLATE_SET1", "T6_CAPEITEM_FW_MARTLOCK@1")] * 3 + \
+              [kill("T6_HEAD_CLOTH_SET3", "T6_ARMOR_CLOTH_SET2", "T6_SHOES_PLATE_SET2", "T6_CAPE")] * 5 + \
+              [kill("T6_HEAD_PLATE_SET1", "T6_ARMOR_PLATE_SET1", "T6_SHOES_PLATE_SET1", "T6_CAPE")]
+        with mock.patch.object(advisor, "_events", lambda *a, **k: evs):
+            kits = optimizer.meta_kits("solo")
+        self.assertEqual(len(kits), 1)                                         # a fixed kit (5 kills) and a 1-kill set are skipped
+        name, pieces, cape, kills = kits[0]
+        self.assertEqual(([f for f, _, _ in pieces], cape, kills), (["HEAD_LEATHER_SET2", "ARMOR_CLOTH_SET2", "SHOES_PLATE_SET1"],
+                                                                    "CAPEITEM_FW_MARTLOCK", 3))
+        lo = optimizer._loadout("2H_DEMONICSTAFF", kits[0], 900, {})
+        self.assertTrue(any("CAPEITEM_FW_MARTLOCK" in e["item"] for e in lo["equipment"]))
+
+    def test_consumable_buffs(self):
+        self.assertAlmostEqual(gearcheck.consumable_buffs("T8_MEAL_STEW")["magicspelldamagebonus"], 0.135)     # food: full value
+        self.assertAlmostEqual(gearcheck.consumable_buffs("T8_MEAL_SANDWICH")["hitpointsmaxbonus"], 0.1553)
+        self.assertAlmostEqual(gearcheck.consumable_buffs("T7_POTION_REVIVE")["hitpointsmaxbonus"], 1.19 * 6 / 15)  # 6 s of 15
+        self.assertGreater(gearcheck.consumable_buffs("T7_MEAL_OMELETTE")["magicspelldamagebonus"], 0)       # CDR → damage
+        self.assertEqual(gearcheck.consumable_buffs("T5_MEAL_SOUP"), {})                                    # out of combat only
+        lo = lambda cons: {"equipment": [{"item": "T6_2H_DEMONICSTAFF"}, {"item": "T6_ARMOR_CLOTH_SET2"}] + [{"item": c} for c in cons]}
+        plain, sand = (gearcheck.build_player(lo(c), {"avg_ip": 1000})["hp"] for c in ([], ["T8_MEAL_SANDWICH"]))
+        self.assertAlmostEqual(sand / plain, 1.1553, places=3)
+        kb = [{"numberOfParticipants": 1, "Killer": {"Equipment": {"Food": {"Type": "T8_MEAL_STEW"}, "Potion": {"Type": p}}}}
+              for p in ["T7_POTION_REVIVE"] * 3 + ["T6_POTION_HEAL"]]
+        with mock.patch.object(advisor, "_events", lambda *a, **k: kb):
+            sets = optimizer.meta_consumables("solo")
+        self.assertEqual([(c[0], c[2]) for c in sets], [("Beef Stew 8.0 + Gigantify Potion 7.0", 3)])  # 1-kill pair skipped
+        self.assertIn(optimizer.ESCAPE_POTION, sets[0][1])
+
+    def test_optimizer_weights(self):
+        w = optimizer._weights("hunter", "pvp_win=1,pve_safe=0,pve_speed=0,pvp_live=0")
+        self.assertEqual(w["pvp_win"], 1.0)
+        self.assertAlmostEqual(sum(optimizer._weights("farm", None).values()), 1.0)
+        for bad in (("nope", None), ("balanced", "speed=1"), ("balanced", "pvp_win=x")):
+            with self.assertRaises(core.AOError):
+                optimizer._weights(*bad)
+
     def test_fight_and_sim(self):
         p = gearcheck.build_player(self.BOW, {"avg_ip": 1250})
         strong, weak = encounter.Fighter(p, 3.0), encounter.Fighter(p, 0.5)
@@ -404,6 +470,153 @@ class Encounters(unittest.TestCase):
         self.assertIn("after the 1000 soft cap", t)
         self.assertIn("fame / hour", t)
         self.assertIn("Camp simulation", encounter.camp_sim(self.BOW, "green", 6, "small", ips="avg=1250"))
+
+
+class EliteRisk(unittest.TestCase):
+    def test_graded_and_worst_map(self):
+        kit = next(k for k in optimizer.KITS if k[0].startswith("Mage Cowl · Cleric"))
+        lo = optimizer._loadout("2H_DEMONICSTAFF", kit, 1000, {})
+        key = encounter.resolve("mists")
+        _, kind, tier, _, cont = encounter.CONTENT[key]
+        p, mp, k = gearcheck.build_player(lo, {"spec_ip": 100}), encounter._maps(kind, tier, cont, 4), encounter.sim_calibration()["k"]
+        risk = [max(r["elite_death"] for r in encounter.simulate(encounter.Fighter(p, k * x), mp, 0.9)) for x in (0.8, 1.0, 1.2)]
+        self.assertGreater(risk[0], risk[1])                                    # less damage → more risk, no 0/1 cliff
+        self.assertGreater(risk[1], risk[2])
+        self.assertTrue(0.05 < risk[1] < 0.95)
+        s = encounter.pve_summary(lo, "mists", ip_spec={"spec_ip": 100})
+        self.assertAlmostEqual(s["elite"], risk[1])                             # worst map, not the median
+        self.assertLessEqual(s["low_worst"], s["low"])
+
+
+class MarketCache(unittest.TestCase):
+    """Per-item cache, batching and 429 handling without the network (urlopen is faked)."""
+    def setUp(self):
+        d = tempfile.mkdtemp()
+        self.patches = [mock.patch.object(market, "CACHE_DIR", d), mock.patch.object(market, "CACHE_DB", os.path.join(d, "m.sqlite")),
+                        mock.patch.object(market, "_mem", {}), mock.patch.object(market.time, "sleep", lambda s: self.slept.append(s))]
+        for p in self.patches:
+            p.start()
+        self.urls, self.slept, self.fail = [], [], 0
+        market.WARNINGS.clear()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def _urlopen(self, req, timeout=None):
+        import io, urllib.error
+        self.urls.append(req.full_url)
+        if self.fail:
+            self.fail -= 1
+            raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"Retry-After": "5"}, io.BytesIO())
+        ids = req.full_url.split("/prices/")[1].split(".json")[0].split(",")
+        body = json.dumps([{"item_id": i, "city": "Caerleon", "sell_price_min": 100} for i in ids]).encode()
+        resp = mock.MagicMock(headers={})
+        resp.read.return_value = body
+        resp.__enter__.return_value = resp
+        return resp
+
+    def test_cache_per_item_and_429(self):
+        with mock.patch.object(market.urllib.request, "urlopen", self._urlopen):
+            self.assertEqual(len(market._get("prices", ["T4_BAG", "T5_BAG"], "europe")), 2)
+            market._get("prices", ["T5_BAG", "T6_BAG"], "europe")
+            self.assertIn("/prices/T6_BAG.json", self.urls[-1])                      # only the uncached item is requested
+            self.fail = 1
+            self.assertEqual(len(market._get("prices", ["T7_BAG"], "europe")), 1)    # waits Retry-After, then succeeds
+            self.assertTrue(4.0 <= sum(self.slept) <= 5.0, self.slept)   # Retry-After 5 s minus the time spent since the 429 (slow CI runners)
+            market._mem.clear()
+            with mock.patch.object(market, "TTL", {"prices": -1}), mock.patch.object(market, "WAIT", 1):
+                self.fail = 9
+                rows = market._get("prices", ["T4_BAG", "T8_BAG"], "europe")          # 429 → stale cache, gap reported
+                self.assertEqual([r["item_id"] for r in rows], ["T4_BAG"])
+                self.assertTrue(any("used cached" in w for w in market.WARNINGS))
+                self.assertTrue(any("no prices data for 1" in w for w in market.WARNINGS))
+                n = len(self.urls)
+                market._get("prices", ["T4_BAG"], "europe")                          # cool-down: no new request
+                self.assertEqual(len(self.urls), n)
+                with self.assertRaises(market.RateLimited):
+                    market._get("prices", ["T8_BAG"], "europe")
+
+    def test_batches(self):
+        ids = [f"T4_ITEM_NUMBER_{i:04d}" for i in range(400)]
+        with mock.patch.object(market.urllib.request, "urlopen", self._urlopen):
+            self.assertEqual(len(market._get("prices", ids, "europe")), 400)
+        self.assertGreater(len(self.urls), 1)
+        self.assertTrue(all(len(u) < 3300 for u in self.urls))
+
+
+class ThinPrices(unittest.TestCase):
+    def test_thin_and_artifact_craft(self):
+        import time as _t
+        now = _t.strftime("%Y-%m-%dT%H:%M:%S", _t.gmtime())
+        listings = {"T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL@1": [("Lymhurst", 2_000_000)],          # lone troll listing
+                    "T4_ARTEFACT_2H_DOUBLEBLADEDSTAFF_CRYSTAL": [("Caerleon", 400_000), ("Martlock", 410_000), ("Lymhurst", 420_000)],
+                    "T4_METALBAR_LEVEL1@1": [("Caerleon", 600)], "T4_LEATHER_LEVEL1@1": [("Caerleon", 650)],
+                    "T4_METALBAR": [("Caerleon", 200)], "T4_LEATHER": [("Caerleon", 250)],
+                    "T5_BAG": [("Caerleon", 20_000)]}
+
+        def fake_get(kind, ids, server, **params):
+            if kind == "history":
+                return []
+            return [{"item_id": i, "city": c, "sell_price_min": p, "sell_price_min_date": now}
+                    for i in ids for c, p in listings.get(i, [])]
+        with mock.patch.object(market, "_get", fake_get), mock.patch.object(market, "_last_load", dict), \
+                mock.patch.object(market, "_last_save", lambda s: None):
+            pm = market.price_map(["T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL@1", "T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL", "T5_BAG"], estimate=True)
+        twin1, twin0, bag = (pm[i] for i in ("T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL@1", "T4_2H_DOUBLEBLADEDSTAFF_CRYSTAL", "T5_BAG"))
+        self.assertTrue(twin1[1].startswith("≈ craft cost") and "looks inflated" in twin1[1])   # 2M listing vs ~430k craft
+        self.assertLess(twin1[0], 500_000)
+        self.assertTrue(twin0[1].startswith("≈ craft cost"))                                      # no listing: artifact + materials
+        self.assertGreater(twin0[0], 400_000)                                                     # not item value × average ratio
+        self.assertTrue(market.is_thin(bag[1]))                                                   # one city, no history
+        self.assertEqual(bag[0], 20_000)
+
+
+class KillboardStore(unittest.TestCase):
+    def test_accumulates_without_duplicates(self):
+        d = tempfile.mkdtemp()
+        ev = lambda i: {"EventId": i, "TimeStamp": f"2099-01-01T00:{i % 60:02d}:00Z", "numberOfParticipants": 1, "Participants": [{"x": 1}],
+                        "Killer": {"AverageItemPower": 1200, "Equipment": {"MainHand": {"Type": "T6_2H_BOW", "Quality": 2}}},
+                        "Victim": {"AverageItemPower": 1100, "Equipment": {"MainHand": {"Type": "T6_MAIN_SWORD", "Quality": 1}}}}
+        pages = {0: [ev(i) for i in range(10, 5, -1)], 51: [ev(i) for i in range(5, 0, -1)]}
+        with mock.patch.object(advisor, "KB_DB", os.path.join(d, "kb.sqlite")), \
+                mock.patch.object(advisor, "_kb_page", lambda url: pages.get(int(url.rsplit("=", 1)[1]), [])), \
+                mock.patch.object(advisor, "_kb_since", lambda: ("2098-01-01", None)):
+            self.assertEqual(len(advisor._events("europe", 2)), 10)
+            pages[0] = [ev(i) for i in range(12, 7, -1)]                     # 2 new events on top of 3 stored ones
+            with mock.patch.object(advisor, "KB_FRESH", -1):
+                evs = advisor._events("europe", 2)
+            self.assertEqual(len(evs), 12)
+            self.assertEqual(advisor.KB_INFO["new"], 2)
+            self.assertNotIn("Participants", evs[0])                          # slim events only
+            self.assertEqual(pvp._fight_scale(evs[0]), "solo")
+
+    def test_matchup_matrix(self):
+        d = lambda w, lose: {"win": w, "lose": lose}
+        t = pvp.matchup_matrix([("A", [d(0.9, 0.1), d(0.3, 0.6), d(0.48, 0.02)]), ("B", [d(0.55, 0.3), d(0.45, 0.35), d(0.5, 0.2)])],
+                               ["X (r) ×3", "Y (r) ×2", "Z (r) ×1"])
+        self.assertIn("90 / 10 ✅", t)
+        self.assertIn("30 / 60 ⚠", t)
+        self.assertIn("**A**: beats X (r) 90%; dies to Y (r) (dies 60%, wins 30%)", t)
+        self.assertIn("**B**: no clear wins; most dangerous: Y (r) (dies 35%)", t)   # ranked by death, not by win
+
+    def test_weighted_ci(self):
+        m, half = pvp.weighted_ci([1.0, 0.0], [10, 10])
+        self.assertAlmostEqual(m, 0.5)
+        self.assertGreater(half, pvp.weighted_ci([1.0, 0.0], [1000, 1000])[1])  # more fights → narrower range
+        self.assertEqual(pvp.weighted_ci([0.7, 0.7], [3, 5])[1], 0.0)
+
+
+class Cli(unittest.TestCase):
+    def test_help_and_quantity_words(self):
+        from aodb import cli
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit):
+            cli.main(["-h"])                                                            # help texts contain '%'
+        self.assertIn("craft_profit", out.getvalue())
+        fake = lambda ids, *a, **k: {i: (1000, "live") for i in ids}
+        with mock.patch.object(market, "price_map", fake):
+            self.assertIn("| 3 |", advisor.build_cost(["T4_BAG", "3x", "T7_MEAL_ROAST"], compare_enchants=False))
 
 
 @unittest.skipUnless(os.environ.get("AO_NET"), "set AO_NET=1 to test the live market API")

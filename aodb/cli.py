@@ -12,10 +12,11 @@ def build_parser():
     sub = ap.add_subparsers(dest="cmd", required=True)
     for t in TOOLS:
         alias = [t["name"].replace("_", "-")] if "_" in t["name"] else []
-        p = sub.add_parser(t["name"], aliases=alias, help=t["desc"], description=t["desc"])
+        # argparse %-formats help strings (not descriptions)
+        p = sub.add_parser(t["name"], aliases=alias, help=t["desc"].replace("%", "%%"), description=t["desc"])
         req = [k for k, v in t["params"].items() if v["required"]]
         for k, v in t["params"].items():
-            h = v["description"] + (f" (default: {v['default']})" if v["default"] not in (None, False) else "")
+            h = (v["description"] + (f" (default: {v['default']})" if v["default"] not in (None, False) else "")).replace("%", "%%")
             if v["required"]:
                 # a single required text arg swallows the rest of the line: `ao item 6.1 broadsword`
                 nargs = "+" if v["type"] == "array" or len(req) == 1 else None

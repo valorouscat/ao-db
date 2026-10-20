@@ -53,6 +53,9 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      `farm_plan` (where to farm: win/death chance vs the meta, expected re-gear loss/h, break-even silver/h). The public
      killboard covers open-world kills only — say it is a proxy for instanced content. Fights/hour are assumptions: ask the
      user for their real numbers and pass `encounters_per_hour` / `silver_per_hour`.
+   - Build ranking for PvPvE content within a budget: `build_optimizer` with `budget`, `distinct` (one row per weapon) and a
+     `profile` matching the user's goal — farm (camps + escape), hunter (fights), survivor (never lose the bag), balanced —
+     or explicit `weights`. Quote PvP win rates with their ± range and the killboard sample line.
    - Monster fights in detail: `encounter_sim` (corrupted dungeon maps, Mists camps / dungeon, hellgate PvE) and `camp_sim`
      (Roads camps) fight every pull second by second → clear time, lowest HP (both dodge scenarios), failed pulls, elite risk,
      fame/hour, hardest pull. Name the hardest pull and heavy hits in the answer; times are calibrated only if the journal has
@@ -62,10 +65,13 @@ scripts behind Cloudflare; search result snippets and other guide sites usually 
      `knowledge/calibration.json`. gear_check/group_check then show calibrated margins with the raw value in brackets;
      `calibration` lists the journal. Repeat clears of the same setup/content → `runs=N` (one entry, weighted), not duplicates.
      With fewer than 3 distinct entries say the offset may not transfer to other tiers/chests/builds.
+     Mists / corrupted / hellgate runs: `record_outcome content=mists min_hp=… clear_minutes=…` (stage = camp/map name from
+     encounter_sim if known) — each content group has its own damage factor; outputs flag a factor borrowed from other content.
 3. **Cost every recommended setup — mandatory whenever gear comes up.** Call `build_cost` with the full set
    (weapon, offhand, head, armor, shoes, cape, food, potions; mount if relevant). Report the total, the .0–.3
    comparison and IP vs the content requirement. For several options, cost each one. Full-loot zones: this is the re-gear cost.
-   Market API rate limited? Say so, give the item list, and use `history` or `price` later.
+   Market API rate limited? Prices are cached per item and the tools wait out short 429 cool-downs (`AO_MARKET_WAIT`);
+   when a result still warns about stale or estimated (≈/~) prices, say so and re-run `build_cost` a few minutes later.
    **Hand over recommended sets ready to import:** `loadout_export` (start from the user's export with `loadout`, swap items,
    `tier`/`enchant`/`quality` for all gear, `spells` by name) → paste the JSON line from its output in the answer.
 4. **Answer format:**
