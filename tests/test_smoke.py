@@ -523,7 +523,7 @@ class MarketCache(unittest.TestCase):
             self.assertIn("/prices/T6_BAG.json", self.urls[-1])                      # only the uncached item is requested
             self.fail = 1
             self.assertEqual(len(market._get("prices", ["T7_BAG"], "europe")), 1)    # waits Retry-After, then succeeds
-            self.assertAlmostEqual(sum(self.slept), 5.0, places=1)
+            self.assertTrue(4.0 <= sum(self.slept) <= 5.0, self.slept)   # Retry-After 5 s minus the time spent since the 429 (slow CI runners)
             market._mem.clear()
             with mock.patch.object(market, "TTL", {"prices": -1}), mock.patch.object(market, "WAIT", 1):
                 self.fail = 9
