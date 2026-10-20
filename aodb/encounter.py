@@ -436,7 +436,7 @@ def encounter_sim(loadout, content="corrupted_stalker", tier=None, ips=None, int
     if heavy:
         left = [(sid, p["hp"] - dmg * combat.mitigation(p["res"]) * 1.5) for sid, dmg in heavy]
         o.append("**Heavy telegraphed hits (dodge them):** " + ", ".join(
-            f"`{sid}` ({'💀 one-shot' if l <= 0 else f'{1 - l / p['hp']:.0%} HP'})" for sid, l in left))
+            f"`{sid}` ({'💀 one-shot' if l <= 0 else format(1 - l / p['hp'], '.0%') + ' HP'})" for sid, l in left))
     est = sorted({m["name"] for _, pulls in mp for pl_ in pulls for m, _ in pl_["pull"] if m["estimated"]})
     if est:
         o.append(f"_⚠est.: no attack data for {', '.join(est[:6])} — damage estimated from mobs of the same tier._")

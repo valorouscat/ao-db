@@ -378,6 +378,14 @@ def _consumables(slot):
 
 def build_search(content="corrupted_stalker", budget=300000, classes=None, weapons=3, levels=None, spec_ip=100, server="europe",
                  city="Caerleon", pages=10, passes=2, maps=4, pvp_weight=None, pvp_content=None):
+    """Advice-mode wrapper: gear changes are scored with IP acting only through item stats (see pvp.advice_mode)."""
+    with pvp.advice_mode():
+        return _build_search(content, budget, classes, weapons, levels, spec_ip, server, city, pages, passes, maps, pvp_weight,
+                             pvp_content)
+
+
+def _build_search(content="corrupted_stalker", budget=300000, classes=None, weapons=3, levels=None, spec_ip=100, server="europe",
+                  city="Caerleon", pages=10, passes=2, maps=4, pvp_weight=None, pvp_content=None):
     """Best builds for a content within a re-gear budget: for the top weapons, every item family of every slot at every IP level
     (cheapest priced tier/enchant), then every active/passive spell of the chosen item, Q/W/E of the weapon, offhands, capes,
     potions and food — coordinate search that keeps the total price ≤ budget."""
@@ -505,8 +513,8 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
                     g_ = gear(f, lv)
                     if g_:
                         cands.append(dict(eq, **{slot: g_}))
-            if slot == "cape":
-                cands.append({k: v for k, v in eq.items() if k != "cape"})
+            # no "drop the cape" candidate: the IP average runs over worn slots, so removing a cheap low-IP cape looks like
+            # an IP gain while the game simply loses the cape's stats and passive
         for c in cands:
             sc = evaluate(c)[0]
             if sc > best_sc + MIN_GAIN:
@@ -534,6 +542,33 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
         fames = [encounter.pve_summary({"name": "s", "equipment": list(e.values())}, pve_key, ip_spec={"spec_ip": spec_ip}, maps=maps)
                  for e in starts.values()]
         fame_ref[0] = max([f["fame_h"] for f in fames if f] or [1]) or 1
+    def level_of(e):
+        return next((lv for lv in levels if cheap.get((gearcheck.advisor._family(e["item"]), lv)) == e["item"]), None)
+
+    def transfer(eq):
+        """Move budget between slots: one slot a level down, another a level up (same items, spells kept). Single-slot
+        moves can't do this once the budget is nearly spent — e.g. a 200k helmet next to a 10k chest piece."""
+        best_sc, best = evaluate(eq)[0], eq
+        gear_slots = [s_ for s_ in ("mainhand", "offhand", "head", "armor", "shoes", "cape") if s_ in eq]
+        for a in gear_slots:
+            la = level_of(eq[a])
+            for lv_a in [lv for lv in levels if la and lv < la]:
+                ga = cheap.get((gearcheck.advisor._family(eq[a]["item"]), lv_a))
+                if not ga:
+                    continue
+                down = dict(eq, **{a: dict(eq[a], item=ga)})
+                for b in gear_slots:
+                    lb = level_of(eq[b]) if b != a else None
+                    for lv_b in [lv for lv in levels if lb and lv > lb]:
+                        gb = cheap.get((gearcheck.advisor._family(eq[b]["item"]), lv_b))
+                        if not gb:
+                            continue
+                        c = dict(down, **{b: dict(eq[b], item=gb)})
+                        sc = evaluate(c)[0]
+                        if sc > best_sc + MIN_GAIN:
+                            best_sc, best = sc, c
+        return best
+
     ranked = sorted(starts, key=lambda w: -evaluate(starts[w])[0])
     results = []
     for w in ranked[:max(1, min(int(weapons), 10))]:
@@ -542,6 +577,11 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
             before = evaluate(eq)[0]
             for s_ in SEARCH_SLOTS:
                 eq = improve(eq, s_)
+            for _t in range(4):  # rebalance the budget across slots until no transfer helps
+                nxt = transfer(eq)
+                if nxt is eq:
+                    break
+                eq = nxt
             if evaluate(eq)[0] <= before + 1e-9:
                 break
         results.append((evaluate(eq), eq))
@@ -583,8 +623,8 @@ def build_search(content="corrupted_stalker", budget=300000, classes=None, weapo
         o.append(f"\n### #{i + 1} {label(eq['mainhand']['item'])} — {money(r['cost'])}\n"
                  + "\n".join(f"- {s}: {desc(eq[s])} · {money(price(eq[s]['item']) or 0)}" for s in SEARCH_SLOTS if s in eq)
                  + "\n```json\n" + json.dumps(lo, ensure_ascii=False, separators=(",", ":")) + "\n```")
-    o.append("\n_Search: coordinate ascent per weapon (each slot fully enumerated given the others, repeated until no slot "
-             "improves) — a local optimum of the full ~10¹² combination space, not a proof of the global one. Win chances: "
+    o.append("\n_Search: coordinate ascent per weapon (each slot fully enumerated given the others, then budget transfers — one "
+             "slot a level down, another a level up — repeated until nothing improves) — a local optimum of the full ~10¹² combination space, not a proof of the global one. Win chances: "
              "the PvP model is calibrated on killboard kills (IP + item families, 79.5% held-out; spells and consumables are not "
              "validated by data). Prices: cheapest listed tier/enchant per IP level, estimates where the market had none._")
     return "\n".join(o)

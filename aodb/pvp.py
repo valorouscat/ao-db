@@ -408,7 +408,7 @@ def build_pvp_player(lo, ip_spec=None, rules=None, intents=None):
     avg, rows = gearcheck.loadout_ip(entries, ip_spec.get("spec_ip", 0), ip_spec.get("weapon_ip"),
                                      ip_spec.get("slot_ip") or raw.get("slot_ip"), ip_spec.get("avg_ip") or raw.get("avg_ip"))
     eff_rows = [[r[0], effective_ip(r[1], rules) if rules else r[1], *r[2:]] for r in rows]
-    eff_avg = sum(r[1] * r[2] for r in eff_rows) / max(sum(r[2] for r in eff_rows), 1)
+    eff_avg = sum(r[1] * r[2] for r in eff_rows) / max(sum(r[2] for r in eff_rows), len(gearcheck.COMBAT_SLOTS))  # empty slot = 0
     hp_given = ip_spec.get("hp") or raw.get("hp")
     # food / potions are modelled below (const_buffs, potion casts) — the calibration was fitted that way, so keep them out of
     # the item stats that gearcheck.player_stats now also fills from consumables (PvE uses those)
@@ -582,6 +582,21 @@ def _ttk(a, b):
 
 CAL_PATH = os.path.join(core.ROOT, "knowledge", "pvp_calibration.json")
 KIT_FEATURES = ("logttk", "burst", "cc", "escape", "ranged", "hp")
+SLOT_IP_FEATURES = ("ip_weapon", "ip_head", "ip_chest", "ip_shoes", "ip_cape")
+CALIBRATED = lambda k: k != "dip"  # forecast: per-slot IP (also a proxy for who wears the gear) + mechanics + items
+# advice: IP only through game mechanics (stats at each item's IP) + base-item patterns — what changing your own gear buys
+ADVICE = lambda k: k == "mech" or (":" in k)
+_MODE = {"advice": False}
+
+
+class advice_mode:
+    """Context: win probabilities from the advice weights (no IP-as-experience proxy) — for gear recommendations."""
+    def __enter__(self):
+        self.prev = _MODE["advice"]
+        _MODE["advice"] = True
+
+    def __exit__(self, *exc):
+        _MODE["advice"] = self.prev
 FAMILY_SLOTS = ("mainhand", "offhand", "head", "armor", "shoes", "cape")
 
 
@@ -600,6 +615,20 @@ def _families(p):
     return {s_: by.get(s_) or "none" for s_ in FAMILY_SLOTS}
 
 
+def _ehp(p, attacker):
+    """Effective HP of p against attacker's damage mix: HP / (mitigation × (1 − Defense))."""
+    return p["stats"]["hp"] / max(_mit(attacker, p), 1e-3)
+
+
+def _weapon_class(p):
+    return (p["weapon"]["row"]["sub1"] if p.get("weapon") else None) or "none"
+
+
+def _armor_type(p):
+    e = next((e for e in p["entries"] if e["row"]["slot"] == "armor" and not e["inventory"]), None)
+    return (e["row"]["sub1"] or "none").replace("_armor", "") if e else "none"
+
+
 def pair_features(a, b, t_ab=None, t_ba=None):
     """Antisymmetric features of a vs b (f(b, a) = −f(a, b)): effective IP gap (100 IP = 1), the duel simulation's kit
     signals (TTK ratio, burst share of HP, CC, escapes, ranged, HP; clipped to ±2) and the item family in every slot
@@ -610,15 +639,32 @@ def pair_features(a, b, t_ab=None, t_ba=None):
     ba, bb = _hit(a, b)[0], _hit(b, a)[0]
     esc = lambda k: k["dash30"] + k["invis30"] / 3 + k["invuln30"]
     clip = lambda x: max(min(x, 2.0), -2.0)
-    f = {"dip": (a["eff_avg"] - b["eff_avg"]) / 100, "logttk": clip(math.log(max(t_ba, 0.1) / max(t_ab, 0.1))),
+    slot_ip = lambda p: {r[0]: r[1] for r in p["eff_rows"]}  # per-slot IP after the cap: each item's stats scale with its own IP
+    sa, sb = slot_ip(a), slot_ip(b)
+    grp = {"weapon": ("mainhand", "offhand"), "head": ("head",), "chest": ("armor",), "shoes": ("shoes",), "cape": ("cape",)}
+    f = {f"ip_{g}": sum(sa.get(x, 0) - sb.get(x, 0) for x in sl) / 100 / len(sl) for g, sl in grp.items()}
+    f.update({"dip": (a["eff_avg"] - b["eff_avg"]) / 100, "logttk": clip(math.log(max(t_ba, 0.1) / max(t_ab, 0.1))),
          "burst": clip(min(ba / b["stats"]["hp"], 2) - min(bb / a["stats"]["hp"], 2)),
          "cc": clip((ka["cc30"] + ka["root30"] - kb["cc30"] - kb["root30"]) / 10), "escape": clip((esc(ka) - esc(kb)) / 10),
-         "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)}
+         "ranged": float(a["ranged"]) - float(b["ranged"]), "hp": clip((a["stats"]["hp"] - b["stats"]["hp"]) / 1000)})
+    # IP enters through game mechanics only: offense = weapon damage scale (+9.18% / 100 IP, damage bonuses), defense = effective
+    # HP from each item's HP / armor / magic resistance at its own IP (slot progression) and Defense — no fitted per-slot IP weights
+    f["mech"] = math.log(max(a["scale"], 1e-6) / max(b["scale"], 1e-6)) + math.log(max(_ehp(a, b), 1.0) / max(_ehp(b, a), 1.0))
+    ca, cb = _weapon_class(a), _weapon_class(b)
+    if ca != cb:  # class matchup (antisymmetric: "x|y" +1 for x vs y, −1 for y vs x)
+        lo_, hi_ = sorted((ca, cb))
+        f[f"mu:{lo_}|{hi_}"] = 1.0 if ca == lo_ else -1.0
+    ka_, kb_ = f"combo:{ca}+{_armor_type(a)}", f"combo:{cb}+{_armor_type(b)}"
+    if ka_ != kb_:  # weapon class × chest armor type of the build
+        f[ka_] = f.get(ka_, 0) + 1
+        f[kb_] = f.get(kb_, 0) - 1
     fa, fb = _families(a), _families(b)
-    for s_ in FAMILY_SLOTS:
+    for s_ in FAMILY_SLOTS:  # an empty slot is not an item: its learned "effect" was who plays without a cape, not gear power
         if fa[s_] != fb[s_]:
-            f[f"{s_}:{fa[s_]}"] = f.get(f"{s_}:{fa[s_]}", 0) + 1
-            f[f"{s_}:{fb[s_]}"] = f.get(f"{s_}:{fb[s_]}", 0) - 1
+            if fa[s_] != "none":
+                f[f"{s_}:{fa[s_]}"] = f.get(f"{s_}:{fa[s_]}", 0) + 1
+            if fb[s_] != "none":
+                f[f"{s_}:{fb[s_]}"] = f.get(f"{s_}:{fb[s_]}", 0) - 1
     return f
 
 
@@ -629,7 +675,7 @@ def win_probability(a, b, t_ab=None, t_ba=None):
     cal = calibration_model()
     if not cal:
         return 1 / (1 + (t_ab / t_ba) ** DUEL_K)
-    w = cal["weights"]
+    w = cal.get("advice") if _MODE["advice"] and cal.get("advice") else cal["weights"]
     z = sum(w.get(k, 0.0) * v for k, v in pair_features(a, b, t_ab, t_ba).items())
     return 1 / (1 + math.exp(-max(min(z, 30), -30)))
 
@@ -674,6 +720,7 @@ def _is_fight(p):
 
 
 KB_STORE = os.path.join(core.ROOT, "knowledge", "killboard_fights.jsonl.gz")
+KB_MIN_IP = 300
 
 
 def _compact_side(p):
@@ -730,6 +777,8 @@ def kb_pairs(fights):
     """[(timestamp, features of killer vs victim, raw p(killer), IP gap)] from stored compact fights."""
     out = []
     for r in fights:
+        if min(r["k"]["ip"] or 0, r["v"]["ip"] or 0) < KB_MIN_IP:  # naked / broken records say nothing about builds
+            continue
         K, V = _expand_side(r["k"]), _expand_side(r["v"])
         try:
             a = build_pvp_player(_kb_loadout(K), {"avg_ip": K["AverageItemPower"]})
@@ -792,12 +841,16 @@ def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3
          f"test {len(test)} (newest {test_share:.0%})", ""]
     tr = [r[1] for r in train]
     w_ip = _fit_logistic(tr, lambda k: k == "dip")
-    w_kit = _fit_logistic(tr, lambda k: ":" not in k)
-    w_all = _fit_logistic(tr)
+    w_slot = _fit_logistic(tr, lambda k: k in SLOT_IP_FEATURES)
+    w_kit = _fit_logistic(tr, lambda k: k in SLOT_IP_FEATURES or k in KIT_FEATURES)
+    w_all = _fit_logistic(tr, CALIBRATED)
+    w_adv = _fit_logistic(tr, ADVICE)
     res = {"IP gap only": [_predict(w_ip, r[1]) for r in test],
+           "per-slot IP gaps": [_predict(w_slot, r[1]) for r in test],
            "raw duel simulation (TTK)": [r[2] for r in test],
-           "IP + simulated kit": [_predict(w_kit, r[1]) for r in test],
-           "IP + kit + items (calibrated)": [_predict(w_all, r[1]) for r in test]}
+           "per-slot IP + simulated kit": [_predict(w_kit, r[1]) for r in test],
+           "IP + kit + items (calibrated)": [_predict(w_all, r[1]) for r in test],
+           "advice: mechanics + items (no IP proxy)": [_predict(w_adv, r[1]) for r in test]}
     rows_t, cal_txt = [], []
     for name, ps in res.items():
         acc, ll, bins = _metrics(ps)
@@ -807,18 +860,26 @@ def pvp_backtest(servers="europe,west,east", pages=20, fit=False, test_share=0.3
         cal_txt.append(f"- {name}: " + "; ".join(f"{b_ * 20}–{b_ * 20 + 20}% → {v[1] / v[0]:.0%} (n={v[0]})" for b_, v in bins.items()))
     o.append(table(rows_t, ["predictor (held-out fights)", "picks the killer", "log-loss (0.693 = coin)", "confident calls (≥75/≤25%)"]))
     o.append("\n**Calibration** (predicted → observed win share):\n" + "\n".join(cal_txt))
-    o.append("\n**Weights** (train): " + ", ".join(f"{n} {w_all.get(n, 0):+.2f}" for n in ("dip",) + KIT_FEATURES)
-             + " — dip = per 100 effective IP; kit signals clipped to ±2.")
-    fam = sorted(((v, k) for k, v in w_all.items() if ":" in k), reverse=True)
+    mu = sorted(((v, k) for k, v in w_adv.items() if k.startswith(("mu:", "combo:"))), reverse=True)
+    if mu:
+        o.append("\n**Strongest class matchups / weapon × armor combos** (advice weights, log-odds): "
+                 + ", ".join(f"{k.split(':', 1)[1]} {v:+.2f}" for v, k in mu[:6]) + " … "
+                 + ", ".join(f"{k.split(':', 1)[1]} {v:+.2f}" for v, k in mu[-4:]))
+    o.append(f"\n**Mechanics weight** (advice): mech {w_adv.get('mech', 0):+.2f} per ln(offense × effective-HP ratio).")
+    o.append("\n**Weights** (train): " + ", ".join(f"{n} {w_all.get(n, 0):+.2f}" for n in SLOT_IP_FEATURES + KIT_FEATURES + ("mech",))
+             + " — ip_* = per 100 effective IP of that slot (each item's stats scale with its own IP); kit signals clipped to ±2.")
+    fam = sorted(((v, k) for k, v in w_adv.items() if ":" in k and not k.startswith(("mu:", "combo:"))), reverse=True)
     if fam:
         nm = lambda k: f"{k.split(':')[0]} {advisor._fam_name(k.split(':', 1)[1])}"
-        o.append("\n**Items that win more than their IP explains** (log-odds; +0.94 ≈ +100 IP): "
+        o.append("\n**Items that win more than their IP explains** (log-odds): "
                  + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[:8])
                  + "\n**…and less:** " + ", ".join(f"{nm(k)} {v:+.2f}" for v, k in fam[-8:]))
     if fit:
-        w_final = _fit_logistic([r[1] for r in rows])
+        w_final = _fit_logistic([r[1] for r in rows], CALIBRATED)
+        w_adv_final = _fit_logistic([r[1] for r in rows], ADVICE)
         acc, ll, _ = _metrics(res["IP + kit + items (calibrated)"])
-        cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4}, "n": len(rows),
+        cal = {"weights": {k: round(v, 4) for k, v in sorted(w_final.items()) if abs(v) >= 1e-4},
+               "advice": {k: round(v, 4) for k, v in sorted(w_adv_final.items()) if abs(v) >= 1e-4}, "n": len(rows),
                "period": [rows[0][0], rows[-1][0]],
                "trained": time.strftime("%Y-%m-%d"), "test_accuracy": round(acc, 4), "test_logloss": round(ll, 4)}
         with open(CAL_PATH, "w", encoding="utf-8") as fh:
@@ -1309,6 +1370,11 @@ def _equip_slot(entry):
 
 
 def pvp_tune(loadout, content="corrupted_stalker", vs="ranged", opp_ip=None, ips=None, slots=None, passes=3, top=5):
+    with advice_mode():
+        return _pvp_tune(loadout, content, vs, opp_ip, ips, slots, passes, top)
+
+
+def _pvp_tune(loadout, content="corrupted_stalker", vs="ranged", opp_ip=None, ips=None, slots=None, passes=3, top=5):
     """Coordinate search over the loadout's slots (weapon spells, head, armor, shoes with every active/passive, cape, potion,
     food) for the best average outcome (win − death) against reference opponents (ranged / melee / all) at opp_ip."""
     key = resolve_zone(content)
